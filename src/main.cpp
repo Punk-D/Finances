@@ -6,7 +6,13 @@
 #include <openssl/rand.h>
 #include <openssl/evp.h>
 
+
+//superuser password. this shall be changed soon
 std::string supass = "4132";
+
+// Create a file logger
+
+
 
 bool doesUsernameExist(const std::string& inputUsername) {
 	// Define the SQL query
@@ -42,29 +48,35 @@ bool doesUsernameExist(const std::string& inputUsername) {
 
 bool sudo_registration_verification()
 {
+	logger->trace("SU verification entered");
 	std::string superuserpassword; bool verify = false;
 	while (!verify)
 	{
 		std::cout << "Enter superuser registration password (ask your manager for it) : "; std::cin >> superuserpassword;
 		if (superuserpassword == supass)
 		{
+			logger->trace("Password asked. Password received is correct");
 			std::cout << "Password confirmed, proceeding to registration sequence" << std::endl;
 			return true;
 		}
 		else
 		{
+			logger->trace("Password asked. Password received is incorrect. Leave or retry asked");
 			std::cout << "Password incorrect. Do you want to leave verification sequence? (Y/N) : "; std::cin >> superuserpassword;
 			if (superuserpassword == "Y")
 			{
+				logger->trace("Leave answer received. Returning to registration");
 				std::cout << "Returning to registration sequence" << std::endl;
 				return false;
 			}
 			else if (superuserpassword == "N")
 			{
+				logger->trace("Retry received. Returning to verification");
 				std::cout << "Returning to verification sequence" << std::endl;
 			}
 			else
 			{
+				logger->trace("Bad input received. Returning to registration");
 				std::cout << "Invalid input. It is a yes or no question. Returning to registration sequence" << std::endl;
 				return false;
 			}
@@ -758,11 +770,11 @@ public:
 		idExists = 0;
 		temp.client_id = b.id;
 		temp.broker_id = b.broker_id;
-		broker a; 
+		broker a;
 		a = a.getBrokerById(temp.broker_id);
 		b = b.getClientById(temp.client_id);
 		idExists = 1;
-		
+
 
 		bool sum_is_possible = 0; float clientsum; float broker_sum = 0;
 		temp.balance_before_transaction = a.portfolio_in_USDT();
@@ -830,10 +842,10 @@ public:
 		}
 
 		idExists = 0;
-		
-		
 
-		
+
+
+
 
 		temp.broker_id = a.id;
 
@@ -920,32 +932,42 @@ public:
 		account temp; bool verify = false;
 		while (!verify) {
 			std::cout << "Choose the type of account to register \n1.Superuser\n2.Client\n3.Broker\nInput : "; std::cin >> temp.account_type;
+			logger->trace("Type of account input asked, input received : {}", temp.account_type);
 			if (temp.account_type == 2 || temp.account_type == 3)
 			{
 				verify = true;
+				logger->trace("Input verified as client/broker");
 			}
 			else if (temp.account_type == 1)
 			{
+				logger->trace("Type of account input received as superuser, proceeding to sudo password check");
 				if (sudo_registration_verification())
 				{
 					verify = true;
+					logger->trace("SU password confirmed");
 				}
 			}
 		}
 		verify = false;
 		while (!verify) {
+			logger->trace("Username prompted");
 			std::cout << "Input username : "; std::cin >> temp.username;
 			if (!doesUsernameExist(temp.username))
 			{
+				logger->trace("Username {} confirmed as non-existent in the database", temp.username);
 				verify = true;
 			}
 			else
 			{
+				logger->trace("Username {} already taken, asking for re-input", temp.username);
 				std::cout << "Username already taken" << std::endl;
 			}
 		}
+		logger->trace("Password prompted");
 		std::cout << "Input password : "; std::cin >> temp.password;
+		logger->trace("Email prompted");
 		std::cout << "Input email : "; std::cin >> temp.email;
+		logger->trace("Phone number prompted");
 		std::cout << "Input phone number : "; std::cin >> temp.phonenumber;
 		if (temp.account_type == 2)
 		{
@@ -960,6 +982,7 @@ public:
 			return temp.addaccountdata(temp);
 		}
 		else {
+			logger->info("Superuser {} created", temp.username);
 			temp.account_reference_id = NULL;
 			return temp.addaccountdata(temp);
 		}
@@ -1033,65 +1056,68 @@ public:
 	}
 	bool superuser(account currentuser)
 	{
+		logger->info("Superuser {} signed in", currentuser.username);
 		std::vector<transaction> transactions;
-	broker temp; transaction transacc; client tempp; account acc;
-	int choice;
-	
-	while (true) {
-		std::cout << "Menu:" << std::endl;
-		std::cout << "1. Input Broker" << std::endl;
-		std::cout << "2. Input Client" << std::endl;
-		std::cout << "3. Input Transaction" << std::endl;
-		std::cout << "4. Output Brokers" << std::endl;
-		std::cout << "5. Output Clients" << std::endl;
-		std::cout << "6. Output Transactions" << std::endl;
-		std::cout << "7. Exit" << std::endl;
-		std::cout << "Enter your choice: ";
+		broker temp; transaction transacc; client tempp; account acc;
+		int choice;
 
-		if (!(std::cin >> choice)) {
-			std::cerr << "Invalid input. Please enter a valid number." << std::endl;
-			std::cin.clear();
-			std::cin.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
-			continue;
+		while (true) {
+			std::cout << "Menu:" << std::endl;
+			std::cout << "1. Input Broker" << std::endl;
+			std::cout << "2. Input Client" << std::endl;
+			std::cout << "3. Input Transaction" << std::endl;
+			std::cout << "4. Output Brokers" << std::endl;
+			std::cout << "5. Output Clients" << std::endl;
+			std::cout << "6. Output Transactions" << std::endl;
+			std::cout << "7. Exit" << std::endl;
+			std::cout << "Enter your choice: ";
+
+			if (!(std::cin >> choice)) {
+				std::cerr << "Invalid input. Please enter a valid number." << std::endl;
+				std::cin.clear();
+				std::cin.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
+				continue;
+			}
+
+			switch (choice) {
+			case 1:
+				// Input Broker logic here
+				choice = temp.addBroker();
+				logger->info("Broker with id {} was created by superuser {}", choice, currentuser.username);
+				break;
+			case 2:
+				// Input Client logic here
+				choice = tempp.addClient();
+				logger->info("Client with id {} was created by superuser {}", choice, currentuser.username);
+				break;
+			case 3:
+				// Input Transaction logic here
+				transacc.createtransaction();
+				break;
+			case 4:
+				// Output list of brokers
+				temp.coutallbrokers();
+				break;
+			case 5:
+				// Output list of clients
+				tempp.coutallclients();
+				break;
+			case 6:
+				// Output list of transactions
+				//outputTransactions(transactions, brokers);
+				break;
+			case 7:
+				// Exit the program
+				std::cout << "Exiting the program." << std::endl;
+				return 0;
+			case 8:
+				std::cout << "Account registration sequence starting" << std::endl << std::endl;
+
+				acc.register_account();
+			default:
+				std::cout << "Invalid choice. Please enter a valid option (1-7)." << std::endl;
+			}
 		}
-
-		switch (choice) {
-		case 1:
-			// Input Broker logic here
-			temp.addBroker();
-			break;
-		case 2:
-			// Input Client logic here
-			tempp.addClient();
-			break;
-		case 3:
-			// Input Transaction logic here
-			transacc.createtransaction();
-			break;
-		case 4:
-			// Output list of brokers
-			temp.coutallbrokers();
-			break;
-		case 5:
-			// Output list of clients
-			tempp.coutallclients();
-			break;
-		case 6:
-			// Output list of transactions
-			//outputTransactions(transactions, brokers);
-			break;
-		case 7:
-			// Exit the program
-			std::cout << "Exiting the program." << std::endl;
-			return 0;
-		case 8:
-			std::cout << "Account registration sequence starting" << std::endl << std::endl;
-
-			acc.register_account();
-		default:
-			std::cout << "Invalid choice. Please enter a valid option (1-7)." << std::endl;
-		}
-	}
 	}
 
 	int CheckPass(const std::string& login, const std::string& password) {
@@ -1208,36 +1234,52 @@ private:
 
 int main()
 {
-	createTables(create_or_open_db());
-	account temp;
-	int choice;
-	bool exitMenu = false;
+	logger->set_level(spdlog::level::info);
+	logger->trace("The program was started");
+	if (createTables(create_or_open_db()))
+	{
+		logger->trace("All tables created successfully");
+		account temp;
+		int choice;
+		bool exitMenu = false;
 
-	while (!exitMenu) {
-		std::cout << "Menu Options:" << std::endl;
-		std::cout << "1. Register" << std::endl;
-		std::cout << "2. Authenticate (Auth)" << std::endl;
-		std::cout << "3. Exit" << std::endl;
-		std::cout << "Enter your choice (1-3): ";
+		while (!exitMenu) {
+			logger->trace("Menu called");
+			std::cout << "Menu Options:" << std::endl;
+			std::cout << "1. Register" << std::endl;
+			std::cout << "2. Authenticate (Auth)" << std::endl;
+			std::cout << "3. Exit" << std::endl;
+			std::cout << "Enter your choice (1-3): ";
 
-		std::cin >> choice;
-
-		switch (choice) {
-		case 1:
-			temp.register_account(); // Call the register_account function from your 'temp' object
-			break;
-		case 2:
-			temp.auth(); // Call the auth function from your 'temp' object
-			break;
-		case 3:
-			std::cout << "Exiting the program." << std::endl;
-			exitMenu = true;
-			break;
-		default:
-			std::cout << "Invalid choice. Please select a valid option (1-3)." << std::endl;
-			break;
+			std::cin >> choice;
+			logger->trace("Choice integer equal to {}", choice);
+			switch (choice) {
+			case 1:
+				logger->trace("Case 1 entered, register account called");
+				temp.register_account(); // Call the register_account function from your 'temp' object
+				break;
+			case 2:
+				logger->trace("Case 2 entered, auth called");
+				temp.auth(); // Call the auth function from your 'temp' object
+				break;
+			case 3:
+				logger->trace("Case 3 entered, exiting program");
+				std::cout << "Exiting the program." << std::endl;
+				exitMenu = true;
+				break;
+			default:
+				logger->trace("Case default entered, asking for choice re-enter");
+				std::cout << "Invalid choice. Please select a valid option (1-3)." << std::endl;
+				break;
+			}
 		}
-	}
 
-	return 0;
+		return 0;
+	}
+	else {
+		std::cout << "Database critical error. Exiting program" << std::endl;
+		logger->critical("Database critical error. Database could not be opened");
+		system("pause");
+		return 0;
+	}
 }
