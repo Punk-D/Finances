@@ -2,17 +2,132 @@
 #include <iostream>
 #include <string>
 #include <vector>
-#include <openssl/sha.h>
-#include <openssl/rand.h>
 #include <openssl/evp.h>
+#include <openssl/sha.h>
+#include <random>
+#include <cctype>
 
-
+//constant for salt lenght. Only affects salt that will be generated after changed, previously generated salt will remain the same size
+const int saltlen = 10;
 //superuser password. this shall be changed soon
 std::string supass = "4132";
 
-// Create a file logger
+bool isStrongPassword(const std::string& password) {
+	// Check if the password length is at least 8 characters
+	if (password.length() < 8) {
+		return false;
+	}
 
+	bool hasLower = false;
+	bool hasUpper = false;
+	bool hasDigit = false;
 
+	// Iterate through each character in the password
+	for (char c : password) {
+		// Check if the character is a lowercase letter
+		if (std::islower(c)) {
+			hasLower = true;
+		}
+		// Check if the character is an uppercase letter
+		else if (std::isupper(c)) {
+			hasUpper = true;
+		}
+		// Check if the character is a digit
+		else if (std::isdigit(c)) {
+			hasDigit = true;
+		}
+	}
+
+	// Check if all three criteria are met
+	return hasLower && hasUpper && hasDigit;
+}
+
+// Function to insert accid and salt into the salt table
+bool insertSalt(const std::string& username, const std::string& salt) {
+	const char* insertSQL = "INSERT INTO salt (username, salt) VALUES (?, ?);";
+	sqlite3_stmt* stmt;
+
+	int result = sqlite3_prepare_v2(keybase, insertSQL, -1, &stmt, NULL);
+	if (result != SQLITE_OK) {
+		std::cerr << "Failed to prepare INSERT statement: " << sqlite3_errmsg(keybase) << std::endl;
+		return false;
+	}
+
+	// Bind the accid and salt parameters to the SQL statement
+	sqlite3_bind_text(stmt, 1, username.c_str(), -1, SQLITE_STATIC);
+	sqlite3_bind_text(stmt, 2, salt.c_str(), -1, SQLITE_STATIC);
+
+	// Execute the SQL statement
+	result = sqlite3_step(stmt);
+	if (result != SQLITE_DONE) {
+		std::cerr << "Failed to insert salt: " << sqlite3_errmsg(keybase) << std::endl;
+		sqlite3_finalize(stmt);
+		return false;
+	}
+
+	// Finalize the statement and return true if successful
+	sqlite3_finalize(stmt);
+	return true;
+}
+
+std::string hashString(const std::string& input) {
+	// Initialize the EVP_MD_CTX
+	EVP_MD_CTX* mdctx = EVP_MD_CTX_new();
+	const EVP_MD* md = EVP_sha256();
+
+	// Initialize the digest
+	EVP_DigestInit_ex(mdctx, md, NULL);
+
+	// Update the context with the input data
+	EVP_DigestUpdate(mdctx, input.c_str(), input.length());
+
+	// Finalize the hash and store it in 'hash' (a 32-byte binary array)
+	unsigned char hash[SHA256_DIGEST_LENGTH];
+	unsigned int hashLen;
+
+	EVP_DigestFinal_ex(mdctx, hash, &hashLen);
+
+	// Clean up the context
+	EVP_MD_CTX_free(mdctx);
+
+	// Convert the binary hash to a hexadecimal string
+	std::string hashedString;
+	char hexBuffer[3]; // Two characters for each byte plus a null terminator
+
+	for (unsigned int i = 0; i < hashLen; ++i) {
+		snprintf(hexBuffer, sizeof(hexBuffer), "%02x", hash[i]);
+		hashedString += hexBuffer;
+	}
+
+	return hashedString;
+}
+
+std::string generateSalt(int length) {
+	// Define a character set from which to generate the salt
+	const std::string charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+
+	// Initialize a random number generator
+	std::random_device rd;
+	std::mt19937 gen(rd());
+	std::uniform_int_distribution<int> distribution(0, charset.length() - 1);
+
+	// Generate the salt
+	std::string salt;
+	for (int i = 0; i < length; ++i) {
+		salt += charset[distribution(gen)];
+	}
+
+	return salt;
+}
+
+bool checkmatch(std::string pass_not_hashed, std::string pass_hashed, std::string salt)
+{
+	if (hashString(pass_not_hashed + salt) == pass_hashed)
+	{
+		return true;
+	}
+	else { return false; }
+}
 
 bool doesUsernameExist(const std::string& inputUsername) {
 	// Define the SQL query
@@ -271,6 +386,8 @@ public:
 	std::string name, surname;
 	float cut_percent;
 	float portfolio_percent;
+
+	//fetches client by his id
 	client getClientById(int desiredClientId) {
 		std::string query = "SELECT name, surname, cut_percent, portfolio_percent, broker_id FROM client WHERE id = " + std::to_string(desiredClientId);
 
@@ -312,7 +429,8 @@ public:
 		// If no client is found or an error occurs, you can return a default Client object or throw an exception
 	}
 
-	int insertClientData(const client& c, int brokerId) {
+	//inserts to the database everything about the client that was received via args
+	int insertClientData(const client& c) {
 		std::string insertClientSQL = "INSERT INTO client (name, surname, cut_percent, portfolio_percent, broker_id) "
 			"VALUES (?, ?, ?, ?, ?);";
 
@@ -322,7 +440,7 @@ public:
 			sqlite3_bind_text(stmt, 2, c.surname.c_str(), -1, SQLITE_STATIC);
 			sqlite3_bind_double(stmt, 3, c.cut_percent);
 			sqlite3_bind_double(stmt, 4, c.portfolio_percent);
-			sqlite3_bind_int(stmt, 5, brokerId);
+			sqlite3_bind_int(stmt, 5, c.broker_id);
 
 			if (sqlite3_step(stmt) == SQLITE_DONE) {
 				// Client inserted successfully, get the last inserted row ID
@@ -344,6 +462,8 @@ public:
 		// Return -1 to indicate failure
 		return -1;
 	}
+
+	//fetches client from the database based on the position, is only used for outputs 
 	client client_fetch(int position) {
 		client result;
 		std::string selectClientSQL = "SELECT id, name, surname, cut_percent, portfolio_percent, broker_id FROM client LIMIT 1 OFFSET ?;";
@@ -379,6 +499,8 @@ public:
 
 		return result;
 	}
+
+	//outputs all clients to the console
 	void coutallclients()
 	{
 		client out;
@@ -388,6 +510,8 @@ public:
 			std::cout << "\tClient ID: " << out.id << ", Name: " << out.name << " " << out.surname << ", broker ID : " << out.broker_id << std::endl;
 		}
 	}
+
+	//Creates a client object, asks user for needed input, passes the data to the insert function
 	int addClient()
 	{
 		client temp;
@@ -423,44 +547,42 @@ public:
 				std::cout << "Id not valid" << std::endl;
 			}
 		}
-		return temp.insertClientData(temp, temp.broker_id);
+		return temp.insertClientData(temp);
 	}
 
+	//Updates client in the database. Uses client.id to identify in the database, overwrites all the data according to the new object
 	bool updateClientById(const client& updatedClient) {
-		// Prepare the SQL UPDATE statement
+
 		std::string query = "UPDATE client SET name=?, surname=?, cut_percent=?, portfolio_percent=? WHERE id=?";
 		sqlite3_stmt* stmt;
 
 		if (sqlite3_prepare_v2(db, query.c_str(), -1, &stmt, 0) == SQLITE_OK) {
-			// Bind values to placeholders
 			sqlite3_bind_text(stmt, 1, updatedClient.name.c_str(), -1, SQLITE_STATIC);
 			sqlite3_bind_text(stmt, 2, updatedClient.surname.c_str(), -1, SQLITE_STATIC);
 			sqlite3_bind_double(stmt, 3, updatedClient.cut_percent);
 			sqlite3_bind_double(stmt, 4, updatedClient.portfolio_percent);
 			sqlite3_bind_int(stmt, 5, updatedClient.id);
 
-			// Execute the SQL statement
 			int result = sqlite3_step(stmt);
 			sqlite3_finalize(stmt);
 
 			if (result == SQLITE_DONE) {
-				// Update was successful
 				return true;
 			}
 			else {
-				// Handle the error if needed
 				std::cerr << "Error updating client: " << sqlite3_errmsg(db) << std::endl;
 				return false;
 			}
 		}
 		else {
-			// Handle the SQL query preparation error
 			sqlite3_finalize(stmt);
 			std::cerr << "Error preparing update statement: " << sqlite3_errmsg(db) << std::endl;
 			return false;
 		}
 	}
 
+	//returns a vector of client object where brokerid is equal to the one received as args
+	//is used when calculating percent changes and updating users after transactions
 	std::vector<client> getClientsByBrokerId(int desiredBrokerId) {
 		std::vector<client> clients;
 
@@ -475,7 +597,6 @@ public:
 				float cut_percent = sqlite3_column_double(stmt, 3);
 				float portfolio_percent = sqlite3_column_double(stmt, 4);
 
-				// Create a Client object and set all the fields
 				client client;
 				client.id = id;
 				client.broker_id = desiredBrokerId;
@@ -507,15 +628,17 @@ public:
 	int id, client_id, broker_id;
 	bool transaction_type, transaction_initiator;
 	float balance_before_transaction, balance_after_transaction, trasactionsum;
-	void insertTransactionData(const transaction& t, int brokerId, int clientId) {
+
+	//inserts the data to the database
+	void insertTransactionData(const transaction& t) {
 		std::string insertTransactionSQL = "INSERT INTO transactions (broker_id, client_id, transaction_type, transaction_initiator, "
 			"balance_before_transaction, balance_after_transaction, transaction_sum) "
 			"VALUES (?, ?, ?, ?, ?, ?, ?);";
 
 		sqlite3_stmt* stmt;
 		if (sqlite3_prepare_v2(db, insertTransactionSQL.c_str(), -1, &stmt, NULL) == SQLITE_OK) {
-			sqlite3_bind_int(stmt, 1, brokerId);
-			sqlite3_bind_int(stmt, 2, clientId);
+			sqlite3_bind_int(stmt, 1, t.broker_id);
+			sqlite3_bind_int(stmt, 2, t.client_id);
 			sqlite3_bind_int(stmt, 3, t.transaction_type);
 			sqlite3_bind_int(stmt, 4, t.transaction_initiator);
 			sqlite3_bind_double(stmt, 5, t.balance_before_transaction);
@@ -614,7 +737,7 @@ public:
 				std::cout << "Input ID : "; std::cin >> id;  idExists = 0;
 				for (int i = 0; i < countRows("client"); i++)
 				{
-					b = b.client_fetch(i);
+					b = b.getClientById(i);
 					if (b.id == id)
 					{
 						idExists = 1;
@@ -665,7 +788,7 @@ public:
 			a.portfolio_percent = (broker_sum / temp.balance_after_transaction) * 100;
 			b.updateClientById(b);
 			a.updateBrokerById(a);
-			temp.insertTransactionData(temp, a.id, b.id);
+			temp.insertTransactionData(temp);
 		}
 		else
 		{
@@ -702,8 +825,8 @@ public:
 				}
 				a.portfolio_percent = (broker_sum / temp.balance_after_transaction) * 100;
 			}
-			a.updateBrokerById(a);
-			temp.insertTransactionData(temp, a.id, NULL);
+			a.updateBrokerById(a); temp.client_id = NULL;
+			temp.insertTransactionData(temp);
 		}
 	}
 	transaction transaction_fetch(int position) {
@@ -814,7 +937,7 @@ public:
 		a.portfolio_percent = (broker_sum / temp.balance_after_transaction) * 100;
 		b.updateClientById(b);
 		a.updateBrokerById(a);
-		temp.insertTransactionData(temp, a.id, b.id);
+		temp.insertTransactionData(temp);
 	}
 
 	void createtransactionbroker(broker a)
@@ -883,7 +1006,8 @@ public:
 			a.portfolio_percent = (broker_sum / temp.balance_after_transaction) * 100;
 		}
 		a.updateBrokerById(a);
-		temp.insertTransactionData(temp, a.id, NULL);
+		temp.client_id = NULL;
+		temp.insertTransactionData(temp);
 	}
 };
 
@@ -951,7 +1075,7 @@ public:
 		verify = false;
 		while (!verify) {
 			logger->trace("Username prompted");
-			std::cout << "Input username : "; std::cin >> temp.username;
+			std::cout << "Input username : "; std::cin.ignore(); std::getline(std::cin, temp.username);
 			if (!doesUsernameExist(temp.username))
 			{
 				logger->trace("Username {} confirmed as non-existent in the database", temp.username);
@@ -964,7 +1088,12 @@ public:
 			}
 		}
 		logger->trace("Password prompted");
-		std::cout << "Input password : "; std::cin >> temp.password;
+		std::cout << "Input password : "; std::getline(std::cin, temp.password);
+		while (!isStrongPassword(temp.password)) {
+			std::cout << "Password is not strong enough. Use at least 1 uppercase, 1 lowercase and 1 number with a length of at least 8 characters\nInput password : "; std::getline(std::cin, temp.password);
+		}
+		std::string salt = generateSalt(saltlen);
+		temp.password = hashString(temp.password + salt);
 		logger->trace("Email prompted");
 		std::cout << "Input email : "; std::cin >> temp.email;
 		logger->trace("Phone number prompted");
@@ -973,23 +1102,23 @@ public:
 		{
 			client clienttemp;
 			temp.account_reference_id = clienttemp.addClient();
-			return temp.addaccountdata(temp);
+			return temp.addaccountdata(temp) && insertSalt(temp.username, salt);
 		}
 		else if (temp.account_type == 3)
 		{
 			broker brokertemp;
 			temp.account_reference_id = brokertemp.addBroker();
-			return temp.addaccountdata(temp);
+			return temp.addaccountdata(temp) && insertSalt(temp.username, salt);
 		}
 		else {
 			logger->info("Superuser {} created", temp.username);
 			temp.account_reference_id = NULL;
-			return temp.addaccountdata(temp);
+			return temp.addaccountdata(temp) && insertSalt(temp.username, salt);
 		}
 	}
 	bool typeclient(account currentaccount)
 	{
-		client currentuser; currentuser = currentuser.client_fetch(currentaccount.account_reference_id);
+		client currentuser; currentuser = currentuser.getClientById(currentaccount.account_reference_id);
 		transaction temp;
 		int choice;
 		bool exitAccount = false;
@@ -1123,7 +1252,6 @@ public:
 	int CheckPass(const std::string& login, const std::string& password) {
 		// SQL statement to select an account based on login
 		const char* selectSQL = "SELECT account_type, password FROM accounts WHERE login = ? LIMIT 1;";
-
 		sqlite3_stmt* stmt;
 
 		// Prepare the SQL statement
@@ -1134,13 +1262,34 @@ public:
 			// Execute the statement
 			if (sqlite3_step(stmt) == SQLITE_ROW) {
 				// Account with the given login exists
-				// Check if the provided password matches
+				// Retrieve account_type and storedPassword
+				int accountType = sqlite3_column_int(stmt, 0);
 				const char* storedPassword = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
-				if (password == storedPassword) {
-					// Password matches, return the account type
-					int accountType = sqlite3_column_int(stmt, 0);
-					sqlite3_finalize(stmt);
-					return accountType;
+
+				// Now, check if the provided password matches
+				const char* selectSaltSQL = "SELECT salt FROM salt WHERE username = ?;";
+				sqlite3_stmt* stmt2;
+
+				if (sqlite3_prepare_v2(keybase, selectSaltSQL, -1, &stmt2, 0) == SQLITE_OK) {
+					// Bind the username parameter
+					sqlite3_bind_text(stmt2, 1, login.c_str(), -1, SQLITE_STATIC);
+
+					// Execute the query
+					if (sqlite3_step(stmt2) == SQLITE_ROW) {
+						// Retrieve the salt value from the result
+						const char* salt = reinterpret_cast<const char*>(sqlite3_column_text(stmt2, 0));
+
+						// Now, call the checkmatch function with the correct arguments
+						if (checkmatch(password, storedPassword, salt)) {
+							// Password matches, return the account type
+							sqlite3_finalize(stmt);
+							sqlite3_finalize(stmt2);
+							return accountType;
+						}
+					}
+
+					// Finalize the statement
+					sqlite3_finalize(stmt2);
 				}
 			}
 
@@ -1151,6 +1300,7 @@ public:
 		// Account does not exist or password does not match
 		return 0;
 	}
+
 
 	bool auth()
 	{
@@ -1208,36 +1358,33 @@ private:
 	}
 };
 
-// Hash a password using bcrypt and return the hash
-//std::string hashPassword(const std::string& password) {
-//	bcrypt bcrypt;
-//	std::string hash;
-//
-//	if (bcrypt.GenerateHash(password, 12, hash) != 0) {
-//		std::cerr << "Error hashing password." << std::endl;
-//		// Handle error if necessary
-//	}
-//
-//	return hash;
-//}
-
-// Verify a password against a stored hash
-//bool verifyPassword(const std::string& password, const std::string& storedHash) {
-//	BCrypt bcrypt;
-//
-//	if (bcrypt.VerifyHash(password, storedHash) == BCrypt::HashResult::Ok) {
-//		return true; // Passwords match
-//	}
-//
-//	return false; // Passwords don't match
-//}
-
 int main()
 {
 	logger->set_level(spdlog::level::info);
 	logger->trace("The program was started");
-	if (createTables(create_or_open_db()))
+	if (createTables(create_or_open_db(&db, "localdb.db")) && create_api_key_decrypt_tables(create_or_open_db(&keybase, "keys.db")))
 	{
+
+
+
+		const char* sql = "PRAGMA database_list;";
+		sqlite3_stmt* stmt;
+
+		if (sqlite3_prepare_v2(keybase, sql, -1, &stmt, nullptr) == SQLITE_OK) {
+			while (sqlite3_step(stmt) == SQLITE_ROW) {
+				const char* databaseName = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 2));
+				std::cout << "Connected to database: " << databaseName << std::endl;
+			}
+
+			sqlite3_finalize(stmt);
+		}
+		else {
+			std::cerr << "Failed to prepare PRAGMA statement: " << sqlite3_errmsg(keybase) << std::endl;
+		}
+
+
+
+
 		logger->trace("All tables created successfully");
 		account temp;
 		int choice;
