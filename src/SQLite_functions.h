@@ -3,36 +3,39 @@
 #include "sqlite3.h"
 #include <spdlog/spdlog.h>
 #include <spdlog/sinks/basic_file_sink.h>
+
+
 auto logger = spdlog::basic_logger_mt("log", "logs1.txt");
 
 
 sqlite3* db;
+sqlite3* keybase;
 
-sqlite3* create_or_open_db()
+sqlite3* create_or_open_db(sqlite3** dbo,std::string dbname)
 {
     logger->trace("Create/open database was called");
     const char* enableForeignKeysSQL = "PRAGMA foreign_keys = ON;";
-
-    std::ifstream file("localdb.db");
+    
+    std::ifstream file(dbname);
     if (!file.is_open())
     {
         // The file does not exist, create it
         logger->trace("SQLite database does not exist, create file localdb called");
-        std::ofstream createFile("localdb.db");
+        std::ofstream createFile(dbname);
         createFile.close();
     }
-    else { logger->trace("SQLite localdb opened successfuly"); }
-    int databaseCode = sqlite3_open("localdb.db", &db);
+    else { logger->trace("SQLite {} opened successfuly", dbname); }
+    int databaseCode = sqlite3_open(dbname.c_str(), dbo);
     if (databaseCode != SQLITE_OK)
     {
-        std::cout << "Database problem code " << databaseCode << std::endl;
-        logger->error("SQLite database not opened. Error : {}", databaseCode);
+        std::cout << "Database problem code "<<databaseCode << std::endl;
+        logger->error("SQLite database {} not opened. Error : {}",dbname, databaseCode);
     }
     else
     {
-        logger->trace("Database opened successfuly");
+        logger->trace("Database {} opened successfuly",dbname);
         std::cout << "Database OK" << std::endl;
-        return db;
+        return *dbo;
     }
 }
 
@@ -65,7 +68,7 @@ bool createTables(sqlite3* db) {
         "name TEXT NOT NULL,"
         "surname TEXT NOT NULL,"
         "cut_percent REAL NOT NULL,"
-        "portfolio_percent REAL NOT NULL,"
+        "portfolio_percent REAL NOT NULL," 
         "broker_id INT NOT NULL,"
         "FOREIGN KEY (broker_id) REFERENCES broker (id)"
         ");";
@@ -166,4 +169,47 @@ int countRows(const char* tableName) {
 
     sqlite3_finalize(stmt);
     return rowCount;
+}
+
+bool create_api_key_decrypt_tables(sqlite3* keybase)
+{
+    bool isOk = true;
+    const char* createKeysTableSQL =
+        "CREATE TABLE IF NOT EXISTS keys ("
+        "brokerid INTEGER PRIMARY KEY,"
+        "key TEXT NOT NULL,"
+        "iv TEXT NOT NULL"
+        ");";
+    const char* createSaltTableSQL =
+        "CREATE TABLE IF NOT EXISTS salt ("
+        "username TEXT PRIMARY KEY,"
+        "salt TEXT NOT NULL"
+        ");";
+    int result; char* errormessage;
+    result=sqlite3_exec(keybase, createKeysTableSQL, nullptr, nullptr, &errormessage);
+    if (result != SQLITE_OK)
+    {
+        std::cout << "Table keys creation error: " << sqlite3_errmsg(keybase) << std::endl;
+        logger->error("create keys table error {}", sqlite3_errmsg(keybase));
+        isOk = false;
+    }
+    else
+    {
+        std::cout << "Table keys is OK" << std::endl;
+        logger->trace("keys table created successfully");
+    }
+
+    result = sqlite3_exec(keybase, createSaltTableSQL, nullptr, nullptr, &errormessage);
+    if (result != SQLITE_OK)
+    {
+        std::cout << "Table salt creation error: " << sqlite3_errmsg(keybase) << std::endl;
+        logger->error("create salt table error {}", sqlite3_errmsg(keybase));
+        isOk = false;
+    }
+    else
+    {
+        std::cout << "Table salt is OK" << std::endl;
+        logger->trace("salt table created successfully");
+    }
+    return isOk;
 }

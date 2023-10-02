@@ -1,4 +1,5 @@
 #include "SQLite_functions.h"
+#include "encrypt.h"
 #include <iostream>
 #include <string>
 #include <vector>
@@ -6,7 +7,10 @@
 #include <openssl/sha.h>
 #include <random>
 #include <cctype>
+#include <bitset>
 
+//constants for keysize and ivsize. Affects generated keys and can become a problem if changed without data restruct
+size_t keysize = 32;  size_t ivsize = 16;
 //constant for salt lenght. Only affects salt that will be generated after changed, previously generated salt will remain the same size
 const int saltlen = 10;
 //superuser password. this shall be changed soon
@@ -40,6 +44,47 @@ bool isStrongPassword(const std::string& password) {
 
 	// Check if all three criteria are met
 	return hasLower && hasUpper && hasDigit;
+}
+
+void insertKeysTable(int brokerId, std::string key, std::string iv) {
+	// Prepare the SQL statement
+	const char* insertSQL = "INSERT INTO keys (brokerid, key, iv) VALUES (?, ?, ?);";
+	sqlite3_stmt* stmt;
+	if (sqlite3_prepare_v2(keybase, insertSQL, -1, &stmt, nullptr) != SQLITE_OK) {
+		std::cerr << "Error preparing SQL statement: " << sqlite3_errmsg(keybase) << std::endl;
+		return;
+	}
+
+	// Bind the brokerId parameter
+	if (sqlite3_bind_int(stmt, 1, brokerId) != SQLITE_OK) {
+		std::cerr << "Error binding brokerId parameter: " << sqlite3_errmsg(keybase) << std::endl;
+		sqlite3_finalize(stmt);
+		return;
+	}
+	
+	if (sqlite3_bind_text(stmt, 2, key.c_str(), -1, SQLITE_STATIC) != SQLITE_OK) {
+		std::cerr << "Error binding key parameter: " << sqlite3_errmsg(keybase) << std::endl;
+		sqlite3_finalize(stmt);
+		return;
+	}
+
+	
+	if (sqlite3_bind_text(stmt, 3, iv.c_str(), -1, SQLITE_STATIC) != SQLITE_OK) {
+		std::cerr << "Error binding iv parameter: " << sqlite3_errmsg(keybase) << std::endl;
+		sqlite3_finalize(stmt);
+		return;
+	}
+
+	// Execute the SQL statement
+	if (sqlite3_step(stmt) != SQLITE_DONE) {
+		std::cerr << "Error inserting data: " << sqlite3_errmsg(keybase) << std::endl;
+	}
+	else {
+		std::cout << "Data inserted successfully." << std::endl;
+	}
+
+	// Finalize the statement
+	sqlite3_finalize(stmt);
 }
 
 // Function to insert accid and salt into the salt table
@@ -241,12 +286,18 @@ public:
 
 	int addBroker()
 	{
+		std::string inputstring,iv,pass;
 		broker temp;
 		std::cout << "Input name and surname : ";
 		std::cin >> temp.name >> temp.surname;
-		std::cout << "Input API key : "; std::cin >> temp.api_key;
+		std::cout << "Input API key : "; std::cin >> inputstring;
+		iv = generateRandomKey(ivsize); pass = generateRandomKey(keysize);
+		temp.api_key = aes256CBCEncrypt(inputstring, pass,iv);
 		temp.portfolio_percent = 0;
-		return temp.broker_upload(temp);
+		int brokerid = temp.broker_upload(temp);
+
+		insertKeysTable(brokerid,pass,iv);
+		return brokerid;
 	}
 	void coutallbrokers()
 	{
@@ -258,10 +309,62 @@ public:
 		}
 	}
 
+	std::pair<std::string, std::string> getIVAndKey(int brokerid) {
+		std::string iv;
+		std::string key;
+
+		// Prepare the SQL statement
+		const char* selectSQL = "SELECT iv, key FROM keys WHERE brokerid = ?;";
+		sqlite3_stmt* stmt;
+
+		if (sqlite3_prepare_v2(keybase, selectSQL, -1, &stmt, nullptr) != SQLITE_OK) {
+			std::cerr << "Error preparing SQL statement: " << sqlite3_errmsg(keybase) << std::endl;
+			return std::make_pair("", "");
+		}
+
+		// Bind the brokerid parameter
+		if (sqlite3_bind_int(stmt, 1, brokerid) != SQLITE_OK) {
+			std::cerr << "Error binding brokerid parameter: " << sqlite3_errmsg(keybase) << std::endl;
+			sqlite3_finalize(stmt);
+			return std::make_pair("", "");
+		}
+
+		// Execute the SQL statement
+		int result = sqlite3_step(stmt);
+
+		if (result == SQLITE_ROW) {
+			// Retrieve IV and key from the database
+			const unsigned char* ivResult = sqlite3_column_text(stmt, 0);
+			const unsigned char* keyResult = sqlite3_column_text(stmt, 1);
+
+			if (ivResult && keyResult) {
+				iv = reinterpret_cast<const char*>(ivResult);
+				key = reinterpret_cast<const char*>(keyResult);
+			}
+		}
+		else if (result != SQLITE_DONE) {
+			std::cerr << "Error fetching data: " << sqlite3_errmsg(keybase) << std::endl;
+		}
+
+		// Finalize the statement
+		sqlite3_finalize(stmt);
+
+		return std::make_pair(iv, key);
+	}
+
+
+	std::string decrypt_api_key()
+	{
+		std::pair<std::string, std::string>IvKey = this->getIVAndKey(this->id);
+		std::cout << IvKey.first << " "<<IvKey.second << std::endl;
+		std::string res = aes256CBCDecrypt(this->api_key, IvKey.second, IvKey.first);
+		std::cout << res << std::endl;
+		return res;
+	}
+
 	float portfolio_in_USDT()
 	{
-		//moreover a placeholder for now as i do not have access to the Binance API
-		//this part WILL be updated as soon as i get my hands on a working API key and an account i can test on
+		std::cout << "API key " << this->decrypt_api_key() << std::endl;
 		std::cout << "Input placeholding data (portfolio cost in usdt) : ";
 		float sum;
 		std::cin >> sum;
@@ -552,7 +655,7 @@ public:
 
 	//Updates client in the database. Uses client.id to identify in the database, overwrites all the data according to the new object
 	bool updateClientById(const client& updatedClient) {
-
+		
 		std::string query = "UPDATE client SET name=?, surname=?, cut_percent=?, portfolio_percent=? WHERE id=?";
 		sqlite3_stmt* stmt;
 
@@ -893,11 +996,11 @@ public:
 		idExists = 0;
 		temp.client_id = b.id;
 		temp.broker_id = b.broker_id;
-		broker a;
+		broker a; 
 		a = a.getBrokerById(temp.broker_id);
 		b = b.getClientById(temp.client_id);
 		idExists = 1;
-
+		
 
 		bool sum_is_possible = 0; float clientsum; float broker_sum = 0;
 		temp.balance_before_transaction = a.portfolio_in_USDT();
@@ -965,10 +1068,10 @@ public:
 		}
 
 		idExists = 0;
+		
+		
 
-
-
-
+		
 
 		temp.broker_id = a.id;
 
@@ -1075,7 +1178,7 @@ public:
 		verify = false;
 		while (!verify) {
 			logger->trace("Username prompted");
-			std::cout << "Input username : "; std::cin.ignore(); std::getline(std::cin, temp.username);
+			std::cout << "Input username : "; std::cin.ignore(); std::getline(std::cin, temp.username); 
 			if (!doesUsernameExist(temp.username))
 			{
 				logger->trace("Username {} confirmed as non-existent in the database", temp.username);
@@ -1083,7 +1186,7 @@ public:
 			}
 			else
 			{
-				logger->trace("Username {} already taken, asking for re-input", temp.username);
+				logger->trace("Username {} already taken, asking for re-input",temp.username);
 				std::cout << "Username already taken" << std::endl;
 			}
 		}
@@ -1102,7 +1205,7 @@ public:
 		{
 			client clienttemp;
 			temp.account_reference_id = clienttemp.addClient();
-			return temp.addaccountdata(temp) && insertSalt(temp.username, salt);
+			return temp.addaccountdata(temp)&&insertSalt(temp.username,salt);
 		}
 		else if (temp.account_type == 3)
 		{
@@ -1187,66 +1290,66 @@ public:
 	{
 		logger->info("Superuser {} signed in", currentuser.username);
 		std::vector<transaction> transactions;
-		broker temp; transaction transacc; client tempp; account acc;
-		int choice;
+	broker temp; transaction transacc; client tempp; account acc;
+	int choice;
+	
+	while (true) {
+		std::cout << "Menu:" << std::endl;
+		std::cout << "1. Input Broker" << std::endl;
+		std::cout << "2. Input Client" << std::endl;
+		std::cout << "3. Input Transaction" << std::endl;
+		std::cout << "4. Output Brokers" << std::endl;
+		std::cout << "5. Output Clients" << std::endl;
+		std::cout << "6. Output Transactions" << std::endl;
+		std::cout << "7. Exit" << std::endl;
+		std::cout << "Enter your choice: ";
 
-		while (true) {
-			std::cout << "Menu:" << std::endl;
-			std::cout << "1. Input Broker" << std::endl;
-			std::cout << "2. Input Client" << std::endl;
-			std::cout << "3. Input Transaction" << std::endl;
-			std::cout << "4. Output Brokers" << std::endl;
-			std::cout << "5. Output Clients" << std::endl;
-			std::cout << "6. Output Transactions" << std::endl;
-			std::cout << "7. Exit" << std::endl;
-			std::cout << "Enter your choice: ";
-
-			if (!(std::cin >> choice)) {
-				std::cerr << "Invalid input. Please enter a valid number." << std::endl;
-				std::cin.clear();
-				std::cin.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
-				continue;
-			}
-
-			switch (choice) {
-			case 1:
-				// Input Broker logic here
-				choice = temp.addBroker();
-				logger->info("Broker with id {} was created by superuser {}", choice, currentuser.username);
-				break;
-			case 2:
-				// Input Client logic here
-				choice = tempp.addClient();
-				logger->info("Client with id {} was created by superuser {}", choice, currentuser.username);
-				break;
-			case 3:
-				// Input Transaction logic here
-				transacc.createtransaction();
-				break;
-			case 4:
-				// Output list of brokers
-				temp.coutallbrokers();
-				break;
-			case 5:
-				// Output list of clients
-				tempp.coutallclients();
-				break;
-			case 6:
-				// Output list of transactions
-				//outputTransactions(transactions, brokers);
-				break;
-			case 7:
-				// Exit the program
-				std::cout << "Exiting the program." << std::endl;
-				return 0;
-			case 8:
-				std::cout << "Account registration sequence starting" << std::endl << std::endl;
-
-				acc.register_account();
-			default:
-				std::cout << "Invalid choice. Please enter a valid option (1-7)." << std::endl;
-			}
+		if (!(std::cin >> choice)) {
+			std::cerr << "Invalid input. Please enter a valid number." << std::endl;
+			std::cin.clear();
+			std::cin.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
+			continue;
 		}
+
+		switch (choice) {
+		case 1:
+			// Input Broker logic here
+			choice = temp.addBroker();
+			logger->info("Broker with id {} was created by superuser {}", choice, currentuser.username);
+			break;
+		case 2:
+			// Input Client logic here
+			choice = tempp.addClient();
+			logger->info("Client with id {} was created by superuser {}", choice, currentuser.username);
+			break;
+		case 3:
+			// Input Transaction logic here
+			transacc.createtransaction();
+			break;
+		case 4:
+			// Output list of brokers
+			temp.coutallbrokers();
+			break;
+		case 5:
+			// Output list of clients
+			tempp.coutallclients();
+			break;
+		case 6:
+			// Output list of transactions
+			//outputTransactions(transactions, brokers);
+			break;
+		case 7:
+			// Exit the program
+			std::cout << "Exiting the program." << std::endl;
+			return 0;
+		case 8:
+			std::cout << "Account registration sequence starting" << std::endl << std::endl;
+
+			acc.register_account();
+		default:
+			std::cout << "Invalid choice. Please enter a valid option (1-7)." << std::endl;
+		}
+	}
 	}
 
 	int CheckPass(const std::string& login, const std::string& password) {
@@ -1362,29 +1465,29 @@ int main()
 {
 	logger->set_level(spdlog::level::info);
 	logger->trace("The program was started");
-	if (createTables(create_or_open_db(&db, "localdb.db")) && create_api_key_decrypt_tables(create_or_open_db(&keybase, "keys.db")))
+	if (createTables(create_or_open_db(&db,"localdb.db")) && create_api_key_decrypt_tables(create_or_open_db(&keybase, "keys.db")))
 	{
+		
 
+		
+			const char* sql = "PRAGMA database_list;";
+			sqlite3_stmt* stmt;
 
+			if (sqlite3_prepare_v2(keybase, sql, -1, &stmt, nullptr) == SQLITE_OK) {
+				while (sqlite3_step(stmt) == SQLITE_ROW) {
+					const char* databaseName = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 2));
+					std::cout << "Connected to database: " << databaseName << std::endl;
+				}
 
-		const char* sql = "PRAGMA database_list;";
-		sqlite3_stmt* stmt;
-
-		if (sqlite3_prepare_v2(keybase, sql, -1, &stmt, nullptr) == SQLITE_OK) {
-			while (sqlite3_step(stmt) == SQLITE_ROW) {
-				const char* databaseName = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 2));
-				std::cout << "Connected to database: " << databaseName << std::endl;
+				sqlite3_finalize(stmt);
+			}
+			else {
+				std::cerr << "Failed to prepare PRAGMA statement: " << sqlite3_errmsg(keybase) << std::endl;
 			}
 
-			sqlite3_finalize(stmt);
-		}
-		else {
-			std::cerr << "Failed to prepare PRAGMA statement: " << sqlite3_errmsg(keybase) << std::endl;
-		}
-
-
-
-
+			
+		
+		
 		logger->trace("All tables created successfully");
 		account temp;
 		int choice;
@@ -1420,13 +1523,13 @@ int main()
 				break;
 			}
 		}
-
+		
 		return 0;
 	}
 	else {
-		std::cout << "Database critical error. Exiting program" << std::endl;
+		std::cout << "Database critical error. Exiting program" << std::endl; 
 		logger->critical("Database critical error. Database could not be opened");
-		system("pause");
+		system("pause"); 
 		return 0;
 	}
 }
