@@ -213,3 +213,70 @@ bool create_api_key_decrypt_tables(sqlite3* keybase)
     }
     return isOk;
 }
+void insertKeysTable(int brokerId, std::string key, std::string iv) {
+    // Prepare the SQL statement
+    const char* insertSQL = "INSERT INTO keys (brokerid, key, iv) VALUES (?, ?, ?);";
+    sqlite3_stmt* stmt;
+    if (sqlite3_prepare_v2(keybase, insertSQL, -1, &stmt, nullptr) != SQLITE_OK) {
+        std::cerr << "Error preparing SQL statement: " << sqlite3_errmsg(keybase) << std::endl;
+        return;
+    }
+
+    // Bind the brokerId parameter
+    if (sqlite3_bind_int(stmt, 1, brokerId) != SQLITE_OK) {
+        std::cerr << "Error binding brokerId parameter: " << sqlite3_errmsg(keybase) << std::endl;
+        sqlite3_finalize(stmt);
+        return;
+    }
+
+    if (sqlite3_bind_text(stmt, 2, key.c_str(), -1, SQLITE_STATIC) != SQLITE_OK) {
+        std::cerr << "Error binding key parameter: " << sqlite3_errmsg(keybase) << std::endl;
+        sqlite3_finalize(stmt);
+        return;
+    }
+
+    if (sqlite3_bind_text(stmt, 3, iv.c_str(), -1, SQLITE_STATIC) != SQLITE_OK) {
+        std::cerr << "Error binding iv parameter: " << sqlite3_errmsg(keybase) << std::endl;
+        sqlite3_finalize(stmt);
+        return;
+    }
+
+    // Execute the SQL statement
+    if (sqlite3_step(stmt) != SQLITE_DONE) {
+        std::cerr << "Error inserting data: " << sqlite3_errmsg(keybase) << std::endl;
+    }
+    else {
+        std::cout << "Data inserted successfully." << std::endl;
+    }
+
+    // Finalize the statement
+    sqlite3_finalize(stmt);
+}
+
+// Function to insert accid and salt into the salt table
+bool insertSalt(const std::string& username, const std::string& salt) {
+    const char* insertSQL = "INSERT INTO salt (username, salt) VALUES (?, ?);";
+    sqlite3_stmt* stmt;
+
+    int result = sqlite3_prepare_v2(keybase, insertSQL, -1, &stmt, NULL);
+    if (result != SQLITE_OK) {
+        std::cerr << "Failed to prepare INSERT statement: " << sqlite3_errmsg(keybase) << std::endl;
+        return false;
+    }
+
+    // Bind the accid and salt parameters to the SQL statement
+    sqlite3_bind_text(stmt, 1, username.c_str(), -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 2, salt.c_str(), -1, SQLITE_STATIC);
+
+    // Execute the SQL statement
+    result = sqlite3_step(stmt);
+    if (result != SQLITE_DONE) {
+        std::cerr << "Failed to insert salt: " << sqlite3_errmsg(keybase) << std::endl;
+        sqlite3_finalize(stmt);
+        return false;
+    }
+
+    // Finalize the statement and return true if successful
+    sqlite3_finalize(stmt);
+    return true;
+}

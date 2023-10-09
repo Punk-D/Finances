@@ -3,19 +3,44 @@
 #include <iostream>
 #include <string>
 #include <vector>
-#include <openssl/evp.h>
-#include <openssl/sha.h>
 #include <random>
 #include <cctype>
 #include <bitset>
+#include <chrono>
 
-//constants for keysize and ivsize. Affects generated keys and can become a problem if changed without data restruct
-size_t keysize = 32;  size_t ivsize = 16;
-//constant for salt lenght. Only affects salt that will be generated after changed, previously generated salt will remain the same size
+// Constant for salt lenght. Only affects salt that will be generated after changed
+// Previously generated salt will remain the same size, the change will not create any trouble to already created lines
+// Keep this at sizes below 100
 const int saltlen = 10;
-//superuser password. this shall be changed soon
+
+// TODO restructure this to be safer
+// superuser password. 
 std::string supass = "4132";
 
+//debug function to test performance
+class Timer {
+public:
+	Timer() : start_time_point(std::chrono::high_resolution_clock::now()) {}
+
+	void start() {
+		start_time_point = std::chrono::high_resolution_clock::now();
+	}
+
+	void end() {
+		auto end_time_point = std::chrono::high_resolution_clock::now();
+		auto start_duration = std::chrono::time_point_cast<std::chrono::microseconds>(start_time_point).time_since_epoch();
+		auto end_duration = std::chrono::time_point_cast<std::chrono::microseconds>(end_time_point).time_since_epoch();
+		auto duration = end_duration - start_duration;
+		double ms = duration.count() * 0.001;
+
+		std::cout << "Time taken: " << ms << " ms" << std::endl;
+	}
+
+private:
+	std::chrono::time_point<std::chrono::high_resolution_clock> start_time_point;
+};
+
+//Verifies password by standart methodology (currently A,a,0 chars = 8)
 bool isStrongPassword(const std::string& password) {
 	// Check if the password length is at least 8 characters
 	if (password.length() < 8) {
@@ -46,150 +71,58 @@ bool isStrongPassword(const std::string& password) {
 	return hasLower && hasUpper && hasDigit;
 }
 
-void insertKeysTable(int brokerId, std::string key, std::string iv) {
-	// Prepare the SQL statement
-	const char* insertSQL = "INSERT INTO keys (brokerid, key, iv) VALUES (?, ?, ?);";
-	sqlite3_stmt* stmt;
-	if (sqlite3_prepare_v2(keybase, insertSQL, -1, &stmt, nullptr) != SQLITE_OK) {
-		std::cerr << "Error preparing SQL statement: " << sqlite3_errmsg(keybase) << std::endl;
-		return;
-	}
+//verifies if a broker exists in the database by his id
+bool does_broker_exist(int& errorcode, std::string& errormsg, int brokerid) {
+	const char* selectSQL = "SELECT 1 FROM broker WHERE id = ? LIMIT 1;";
 
-	// Bind the brokerId parameter
-	if (sqlite3_bind_int(stmt, 1, brokerId) != SQLITE_OK) {
-		std::cerr << "Error binding brokerId parameter: " << sqlite3_errmsg(keybase) << std::endl;
-		sqlite3_finalize(stmt);
-		return;
-	}
-	
-	if (sqlite3_bind_text(stmt, 2, key.c_str(), -1, SQLITE_STATIC) != SQLITE_OK) {
-		std::cerr << "Error binding key parameter: " << sqlite3_errmsg(keybase) << std::endl;
-		sqlite3_finalize(stmt);
-		return;
-	}
-
-	
-	if (sqlite3_bind_text(stmt, 3, iv.c_str(), -1, SQLITE_STATIC) != SQLITE_OK) {
-		std::cerr << "Error binding iv parameter: " << sqlite3_errmsg(keybase) << std::endl;
-		sqlite3_finalize(stmt);
-		return;
-	}
-
-	// Execute the SQL statement
-	if (sqlite3_step(stmt) != SQLITE_DONE) {
-		std::cerr << "Error inserting data: " << sqlite3_errmsg(keybase) << std::endl;
-	}
-	else {
-		std::cout << "Data inserted successfully." << std::endl;
-	}
-
-	// Finalize the statement
-	sqlite3_finalize(stmt);
-}
-
-// Function to insert accid and salt into the salt table
-bool insertSalt(const std::string& username, const std::string& salt) {
-	const char* insertSQL = "INSERT INTO salt (username, salt) VALUES (?, ?);";
-	sqlite3_stmt* stmt;
-
-	int result = sqlite3_prepare_v2(keybase, insertSQL, -1, &stmt, NULL);
-	if (result != SQLITE_OK) {
-		std::cerr << "Failed to prepare INSERT statement: " << sqlite3_errmsg(keybase) << std::endl;
-		return false;
-	}
-
-	// Bind the accid and salt parameters to the SQL statement
-	sqlite3_bind_text(stmt, 1, username.c_str(), -1, SQLITE_STATIC);
-	sqlite3_bind_text(stmt, 2, salt.c_str(), -1, SQLITE_STATIC);
-
-	// Execute the SQL statement
-	result = sqlite3_step(stmt);
-	if (result != SQLITE_DONE) {
-		std::cerr << "Failed to insert salt: " << sqlite3_errmsg(keybase) << std::endl;
+	sqlite3_stmt* stmt = nullptr;
+	if (sqlite3_prepare_v2(db, selectSQL, -1, &stmt, nullptr) != SQLITE_OK) {
 		sqlite3_finalize(stmt);
 		return false;
 	}
 
-	// Finalize the statement and return true if successful
-	sqlite3_finalize(stmt);
-	return true;
-}
-
-std::string hashString(const std::string& input) {
-	// Initialize the EVP_MD_CTX
-	EVP_MD_CTX* mdctx = EVP_MD_CTX_new();
-	const EVP_MD* md = EVP_sha256();
-
-	// Initialize the digest
-	EVP_DigestInit_ex(mdctx, md, NULL);
-
-	// Update the context with the input data
-	EVP_DigestUpdate(mdctx, input.c_str(), input.length());
-
-	// Finalize the hash and store it in 'hash' (a 32-byte binary array)
-	unsigned char hash[SHA256_DIGEST_LENGTH];
-	unsigned int hashLen;
-
-	EVP_DigestFinal_ex(mdctx, hash, &hashLen);
-
-	// Clean up the context
-	EVP_MD_CTX_free(mdctx);
-
-	// Convert the binary hash to a hexadecimal string
-	std::string hashedString;
-	char hexBuffer[3]; // Two characters for each byte plus a null terminator
-
-	for (unsigned int i = 0; i < hashLen; ++i) {
-		snprintf(hexBuffer, sizeof(hexBuffer), "%02x", hash[i]);
-		hashedString += hexBuffer;
+	if (sqlite3_bind_int(stmt, 1, brokerid) != SQLITE_OK) {
+		errorcode = 502;
+		errormsg = "Database could not be opened";
+		sqlite3_finalize(stmt);
+		return false;
 	}
 
-	return hashedString;
-}
-
-std::string generateSalt(int length) {
-	// Define a character set from which to generate the salt
-	const std::string charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
-
-	// Initialize a random number generator
-	std::random_device rd;
-	std::mt19937 gen(rd());
-	std::uniform_int_distribution<int> distribution(0, charset.length() - 1);
-
-	// Generate the salt
-	std::string salt;
-	for (int i = 0; i < length; ++i) {
-		salt += charset[distribution(gen)];
-	}
-
-	return salt;
-}
-
-bool checkmatch(std::string pass_not_hashed, std::string pass_hashed, std::string salt)
-{
-	if (hashString(pass_not_hashed + salt) == pass_hashed)
-	{
+	if (sqlite3_step(stmt) == SQLITE_ROW) {
+		sqlite3_finalize(stmt);
+		errorcode = 0;
 		return true;
 	}
-	else { return false; }
+
+	sqlite3_finalize(stmt);
+	errorcode = 0;
+	return false;
 }
 
-bool doesUsernameExist(const std::string& inputUsername) {
+//Checks if a username is present in the database
+bool doesUsernameExist(int& errorcode, std::string& errormsg, const std::string& inputUsername) {
 	// Define the SQL query
 	const char* selectSQL = "SELECT 1 FROM accounts WHERE login = ? LIMIT 1;";
 
 	// Prepare the statement
 	sqlite3_stmt* stmt = nullptr;
 	if (sqlite3_prepare_v2(db, selectSQL, -1, &stmt, nullptr) != SQLITE_OK) {
-		// Handle the error (e.g., print an error message, finalize stmt, and return false)
+		// Handle the error
+		logger->error("SQLite error: {}", sqlite3_errmsg(db));
+		errormsg = "SQLite error: ";
+		errormsg += sqlite3_errmsg(db);
+		errorcode = SQLITE_ERROR;
 		sqlite3_finalize(stmt);
 		return false;
 	}
 
 	// Bind the input parameter (username)
 	if (sqlite3_bind_text(stmt, 1, inputUsername.c_str(), -1, SQLITE_STATIC) != SQLITE_OK) {
-		// Handle the error (e.g., print an error message, finalize stmt, and return false)
-		std::cout << "ERROR : could not check table accounts" << std::endl;
+		// Handle the error
+		logger->error("Failed to bind username parameter: {}", sqlite3_errmsg(db));
+		errormsg = "Failed to bind username parameter: ";
+		errormsg += sqlite3_errmsg(db);
+		errorcode = SQLITE_ERROR;
 		sqlite3_finalize(stmt);
 		return false;
 	}
@@ -198,14 +131,32 @@ bool doesUsernameExist(const std::string& inputUsername) {
 	if (sqlite3_step(stmt) == SQLITE_ROW) {
 		// Username exists in the database
 		sqlite3_finalize(stmt); // Finalize the statement
+		logger->info("Username '{}' exists in the database.", inputUsername);
 		return true;
 	}
 
 	// Username does not exist in the database
 	sqlite3_finalize(stmt); // Finalize the statement
+	logger->info("Username '{}' does not exist in the database.", inputUsername);
 	return false;
 }
 
+//Verifies if a superuser password is correct
+bool sudo_reg_ver_API(std::string password)
+{
+	if (password == supass)
+	{
+		logger->info("Superuser registration failed, wrong password");
+		return true;
+	}
+	else
+	{
+		return false;
+	}
+}
+
+//Server only, do not use
+//Deprecated for API usage. Instead use sudo_reg_ver_API
 bool sudo_registration_verification()
 {
 	logger->trace("SU verification entered");
@@ -251,54 +202,79 @@ public:
 	std::string name, surname;
 	float portfolio_percent;
 	std::string api_key;
-	int broker_upload(broker brokeri) {
+
+	//Uploads a broker object to the database
+	int broker_upload(int& errorcode, std::string& errormsg) {
 		// Create an INSERT statement for broker
 		std::string insertBrokerSQL = "INSERT INTO broker (name, surname, portfolio_percent, api_key) "
 			"VALUES (?, ?, ?, ?);";
 
 		sqlite3_stmt* stmt;
 		if (sqlite3_prepare_v2(db, insertBrokerSQL.c_str(), -1, &stmt, NULL) == SQLITE_OK) {
-			sqlite3_bind_text(stmt, 1, brokeri.name.c_str(), -1, SQLITE_STATIC);
-			sqlite3_bind_text(stmt, 2, brokeri.surname.c_str(), -1, SQLITE_STATIC);
-			sqlite3_bind_double(stmt, 3, brokeri.portfolio_percent);
-			sqlite3_bind_text(stmt, 4, brokeri.api_key.c_str(), -1, SQLITE_STATIC);
+			sqlite3_bind_text(stmt, 1, this->name.c_str(), -1, SQLITE_STATIC);
+			sqlite3_bind_text(stmt, 2, this->surname.c_str(), -1, SQLITE_STATIC);
+			sqlite3_bind_double(stmt, 3, this->portfolio_percent);
+			sqlite3_bind_text(stmt, 4, this->api_key.c_str(), -1, SQLITE_STATIC);
 
 			if (sqlite3_step(stmt) == SQLITE_DONE) {
 				// Broker inserted successfully, get the last inserted row ID
 				int brokerId = sqlite3_last_insert_rowid(db);
-				std::cout << "Broker inserted successfully. Broker ID: " << brokerId << std::endl;
+				logger->info("Broker inserted successfully. Broker ID: {}", brokerId);
 				sqlite3_finalize(stmt);
 				return brokerId;
 			}
 			else {
-				std::cerr << "Failed to insert broker: " << sqlite3_errmsg(db) << std::endl;
+				// Handle the error
+				errorcode = SQLITE_ERROR;
+				errormsg = "Failed to insert broker: " + std::string(sqlite3_errmsg(db));
+				logger->error(errormsg);
 			}
 
 			sqlite3_finalize(stmt);
 		}
 		else {
-			std::cerr << "Failed to prepare INSERT statement: " << sqlite3_errmsg(db) << std::endl;
+			// Handle the error
+			errorcode = SQLITE_ERROR;
+			errormsg = "Failed to prepare INSERT statement: " + std::string(sqlite3_errmsg(db));
+			logger->error(errormsg);
 		}
 
 		// Return -1 to indicate failure
 		return -1;
 	}
 
-	int addBroker()
+
+	//TODO Add error handling
+	int addBrokerAPI(int& errorcode, std::string& errormsg)
 	{
-		std::string inputstring,iv,pass;
+		std::string inputstring, iv, pass;
+		iv = generateRandomKey(16); pass = generateRandomKey(32);
+		this->api_key = aes256CBCEncrypt(inputstring, pass, iv);
+		this->portfolio_percent = 0;
+		int brokerid = this->broker_upload(errorcode, errormsg);
+
+		insertKeysTable(brokerid, pass, iv);
+		return brokerid;
+	}
+
+	//Server only, do not use
+	int addBroker(int& errorcode, std::string& errormsg)
+	{
+		std::string inputstring, iv, pass;
 		broker temp;
 		std::cout << "Input name and surname : ";
 		std::cin >> temp.name >> temp.surname;
 		std::cout << "Input API key : "; std::cin >> inputstring;
-		iv = generateRandomKey(ivsize); pass = generateRandomKey(keysize);
-		temp.api_key = aes256CBCEncrypt(inputstring, pass,iv);
+		iv = generateRandomKey(16); pass = generateRandomKey(32);
+		temp.api_key = aes256CBCEncrypt(inputstring, pass, iv);
 		temp.portfolio_percent = 0;
-		int brokerid = temp.broker_upload(temp);
+		int brokerid = temp.broker_upload(errorcode, errormsg);
 
-		insertKeysTable(brokerid,pass,iv);
+		insertKeysTable(brokerid, pass, iv);
 		return brokerid;
 	}
+
+	//Server only, do not use
 	void coutallbrokers()
 	{
 		broker cycle;
@@ -309,6 +285,7 @@ public:
 		}
 	}
 
+	//TODO Add error handling
 	std::pair<std::string, std::string> getIVAndKey(int brokerid) {
 		std::string iv;
 		std::string key;
@@ -352,28 +329,33 @@ public:
 		return std::make_pair(iv, key);
 	}
 
-
+	//TODO Add error handling
 	std::string decrypt_api_key()
 	{
 		std::pair<std::string, std::string>IvKey = this->getIVAndKey(this->id);
-		std::cout << IvKey.first << " "<<IvKey.second << std::endl;
+		//std::cout << IvKey.first << " "<<IvKey.second << std::endl;
 		std::string res = aes256CBCDecrypt(this->api_key, IvKey.second, IvKey.first);
-		std::cout << res << std::endl;
+		//std::cout << res << std::endl;
 		return res;
 	}
 
+	//TODO
 	float portfolio_in_USDT()
 	{
 		std::cout << "API key " << this->decrypt_api_key() << std::endl;
 		std::cout << "Input placeholding data (portfolio cost in usdt) : ";
-		float sum;
-		std::cin >> sum;
+		float sum = 100;
+		//std::cin >> sum;
 		return sum;
 	}
+
+	//Fetches a broker's portfolio percent. Will probably be deprecated soon due to no need
 	float portfolio_percent_USDT()
 	{
-		return (portfolio_percent / 100) * portfolio_in_USDT();
+		return (this->portfolio_percent / 100) * portfolio_in_USDT();
 	}
+
+	//TODO Add error handling
 	broker broker_fetch(int position) {
 		broker result;
 		std::string selectBrokerSQL = "SELECT id, name, surname, portfolio_percent, api_key FROM broker LIMIT 1 OFFSET ?;";
@@ -408,6 +390,8 @@ public:
 
 		return result;
 	}
+
+	//TODO Add error handling
 	broker getBrokerById(int desiredBrokerId) {
 		std::string query = "SELECT name, surname, portfolio_percent, api_key FROM broker WHERE id = " + std::to_string(desiredBrokerId);
 
@@ -446,6 +430,8 @@ public:
 
 		// If no broker is found or an error occurs, you can return a default Broker object or throw an exception
 	}
+
+	//TODO Add error handling
 	bool updateBrokerById(const broker& updatedBroker) {
 		// Prepare the SQL UPDATE statement
 		std::string query = "UPDATE broker SET name=?, surname=?, portfolio_percent=?, api_key=? WHERE id=?";
@@ -491,6 +477,7 @@ public:
 	float portfolio_percent;
 
 	//fetches client by his id
+	//TODO Add error handling
 	client getClientById(int desiredClientId) {
 		std::string query = "SELECT name, surname, cut_percent, portfolio_percent, broker_id FROM client WHERE id = " + std::to_string(desiredClientId);
 
@@ -533,17 +520,18 @@ public:
 	}
 
 	//inserts to the database everything about the client that was received via args
-	int insertClientData(const client& c) {
+	//TODO Add error handling
+	int insertClientData() {
 		std::string insertClientSQL = "INSERT INTO client (name, surname, cut_percent, portfolio_percent, broker_id) "
 			"VALUES (?, ?, ?, ?, ?);";
 
 		sqlite3_stmt* stmt;
 		if (sqlite3_prepare_v2(db, insertClientSQL.c_str(), -1, &stmt, NULL) == SQLITE_OK) {
-			sqlite3_bind_text(stmt, 1, c.name.c_str(), -1, SQLITE_STATIC);
-			sqlite3_bind_text(stmt, 2, c.surname.c_str(), -1, SQLITE_STATIC);
-			sqlite3_bind_double(stmt, 3, c.cut_percent);
-			sqlite3_bind_double(stmt, 4, c.portfolio_percent);
-			sqlite3_bind_int(stmt, 5, c.broker_id);
+			sqlite3_bind_text(stmt, 1, this->name.c_str(), -1, SQLITE_STATIC);
+			sqlite3_bind_text(stmt, 2, this->surname.c_str(), -1, SQLITE_STATIC);
+			sqlite3_bind_double(stmt, 3, this->cut_percent);
+			sqlite3_bind_double(stmt, 4, this->portfolio_percent);
+			sqlite3_bind_int(stmt, 5, this->broker_id);
 
 			if (sqlite3_step(stmt) == SQLITE_DONE) {
 				// Client inserted successfully, get the last inserted row ID
@@ -566,7 +554,9 @@ public:
 		return -1;
 	}
 
-	//fetches client from the database based on the position, is only used for outputs 
+	//fetches client from the database based on the position, is only used for outputs
+	//TODO Add error handling
+	//Server only, do not use
 	client client_fetch(int position) {
 		client result;
 		std::string selectClientSQL = "SELECT id, name, surname, cut_percent, portfolio_percent, broker_id FROM client LIMIT 1 OFFSET ?;";
@@ -604,6 +594,7 @@ public:
 	}
 
 	//outputs all clients to the console
+	//Server only, do not use
 	void coutallclients()
 	{
 		client out;
@@ -614,7 +605,40 @@ public:
 		}
 	}
 
+	//Uses the data received from client app to fill the database
+	//Returns inserted client ID (from db, id is autoincremented, therefore not present in programm)
+	int add_client_API(int& errorcode, std::string& errormsg, std::string name, std::string surname, float cut, int brokerid)
+	{
+		if (cut > 100 || cut < 0)
+		{
+			errorcode = 400;
+			errormsg = "Impossible cut input";
+			return 0;
+		}
+		if (!does_broker_exist(errorcode, errormsg, brokerid))
+		{
+			if (errorcode != 0)
+			{
+				return 0;
+			}
+			else
+			{
+				errorcode = 400;
+				errormsg = "No broker with the id " + std::to_string(brokerid) + " could be found";
+				return 0;
+			}
+		}
+		this->name = name;
+		this->surname = surname;
+		this->cut_percent = cut;
+		this->broker_id = brokerid;
+		this->portfolio_percent = 0;
+		errorcode = 0;
+		return this->insertClientData();
+	}
+
 	//Creates a client object, asks user for needed input, passes the data to the insert function
+	//Server only, do not use
 	int addClient()
 	{
 		client temp;
@@ -650,21 +674,20 @@ public:
 				std::cout << "Id not valid" << std::endl;
 			}
 		}
-		return temp.insertClientData(temp);
+		return temp.insertClientData();
 	}
 
 	//Updates client in the database. Uses client.id to identify in the database, overwrites all the data according to the new object
-	bool updateClientById(const client& updatedClient) {
-		
+	bool updateClientById(int errorcode, std::string errormsg) {
 		std::string query = "UPDATE client SET name=?, surname=?, cut_percent=?, portfolio_percent=? WHERE id=?";
 		sqlite3_stmt* stmt;
 
 		if (sqlite3_prepare_v2(db, query.c_str(), -1, &stmt, 0) == SQLITE_OK) {
-			sqlite3_bind_text(stmt, 1, updatedClient.name.c_str(), -1, SQLITE_STATIC);
-			sqlite3_bind_text(stmt, 2, updatedClient.surname.c_str(), -1, SQLITE_STATIC);
-			sqlite3_bind_double(stmt, 3, updatedClient.cut_percent);
-			sqlite3_bind_double(stmt, 4, updatedClient.portfolio_percent);
-			sqlite3_bind_int(stmt, 5, updatedClient.id);
+			sqlite3_bind_text(stmt, 1, this->name.c_str(), -1, SQLITE_STATIC);
+			sqlite3_bind_text(stmt, 2, this->surname.c_str(), -1, SQLITE_STATIC);
+			sqlite3_bind_double(stmt, 3, this->cut_percent);
+			sqlite3_bind_double(stmt, 4, this->portfolio_percent);
+			sqlite3_bind_int(stmt, 5, this->id);
 
 			int result = sqlite3_step(stmt);
 			sqlite3_finalize(stmt);
@@ -674,18 +697,21 @@ public:
 			}
 			else {
 				std::cerr << "Error updating client: " << sqlite3_errmsg(db) << std::endl;
+				errorcode = 502; errormsg = "Error updating client: " + std::string(sqlite3_errmsg(db));
 				return false;
 			}
 		}
 		else {
 			sqlite3_finalize(stmt);
 			std::cerr << "Error preparing update statement: " << sqlite3_errmsg(db) << std::endl;
+			errorcode = 502; errormsg = "Error preparing update statement: " + std::string(sqlite3_errmsg(db));
 			return false;
 		}
 	}
 
 	//returns a vector of client object where brokerid is equal to the one received as args
 	//is used when calculating percent changes and updating users after transactions
+	//TODO Add error handling
 	std::vector<client> getClientsByBrokerId(int desiredBrokerId) {
 		std::vector<client> clients;
 
@@ -732,21 +758,22 @@ public:
 	bool transaction_type, transaction_initiator;
 	float balance_before_transaction, balance_after_transaction, trasactionsum;
 
+	//TODO Add error handling
 	//inserts the data to the database
-	void insertTransactionData(const transaction& t) {
+	void insertTransactionData() {
 		std::string insertTransactionSQL = "INSERT INTO transactions (broker_id, client_id, transaction_type, transaction_initiator, "
 			"balance_before_transaction, balance_after_transaction, transaction_sum) "
 			"VALUES (?, ?, ?, ?, ?, ?, ?);";
 
 		sqlite3_stmt* stmt;
 		if (sqlite3_prepare_v2(db, insertTransactionSQL.c_str(), -1, &stmt, NULL) == SQLITE_OK) {
-			sqlite3_bind_int(stmt, 1, t.broker_id);
-			sqlite3_bind_int(stmt, 2, t.client_id);
-			sqlite3_bind_int(stmt, 3, t.transaction_type);
-			sqlite3_bind_int(stmt, 4, t.transaction_initiator);
-			sqlite3_bind_double(stmt, 5, t.balance_before_transaction);
-			sqlite3_bind_double(stmt, 6, t.balance_after_transaction);
-			sqlite3_bind_double(stmt, 7, t.trasactionsum);
+			sqlite3_bind_int(stmt, 1, this->broker_id);
+			sqlite3_bind_int(stmt, 2, this->client_id);
+			sqlite3_bind_int(stmt, 3, this->transaction_type);
+			sqlite3_bind_int(stmt, 4, this->transaction_initiator);
+			sqlite3_bind_double(stmt, 5, this->balance_before_transaction);
+			sqlite3_bind_double(stmt, 6, this->balance_after_transaction);
+			sqlite3_bind_double(stmt, 7, this->trasactionsum);
 
 			if (sqlite3_step(stmt) == SQLITE_DONE) {
 				std::cout << "Transaction inserted successfully." << std::endl;
@@ -761,7 +788,9 @@ public:
 			std::cerr << "Failed to prepare INSERT statement for transaction: " << sqlite3_errmsg(db) << std::endl;
 		}
 	}
-	void createtransaction()
+
+	//Server only, do not use
+	void createtransaction(int& errorcode, std::string& errormsg)
 	{
 		transaction temp;
 		bool idExists = 0;
@@ -884,14 +913,14 @@ public:
 				if (vec[i].id != b.id) {
 					tempclientsum = (vec[i].portfolio_percent / 100) * temp.balance_before_transaction;
 					vec[i].portfolio_percent = (tempclientsum / temp.balance_after_transaction) * 100;
-					vec[i].updateClientById(vec[i]);
+					if (vec[i].updateClientById(errorcode, errormsg) == 0) { errormsg = errormsg + "\nTransaction could not be completed"; }
 				}
 			}
 			broker_sum = broker_sum + (a.portfolio_percent / 100) * temp.balance_before_transaction;
 			a.portfolio_percent = (broker_sum / temp.balance_after_transaction) * 100;
-			b.updateClientById(b);
-			a.updateBrokerById(a);
-			temp.insertTransactionData(temp);
+			if (b.updateClientById(errorcode, errormsg) == 0) { errormsg = errormsg + "\nTransaction could not be completed"; }
+			if (a.updateBrokerById(a) == 0) { errormsg = errormsg + "\nTransaction could not be completed"; }
+			temp.insertTransactionData();
 		}
 		else
 		{
@@ -924,14 +953,17 @@ public:
 				{
 					tempclientsum = (vec[i].portfolio_percent / 100) * temp.balance_before_transaction;
 					vec[i].portfolio_percent = (tempclientsum / temp.balance_after_transaction) * 100;
-					b.updateClientById(vec[i]);
+					if (vec[i].updateClientById(errorcode, errormsg) == 0) { errormsg = errormsg + "\nTransaction could not be completed"; }
 				}
 				a.portfolio_percent = (broker_sum / temp.balance_after_transaction) * 100;
 			}
-			a.updateBrokerById(a); temp.client_id = NULL;
-			temp.insertTransactionData(temp);
+			if (a.updateBrokerById(a) == 0) { errormsg = errormsg + "\nTransaction could not be completed"; }
+			temp.client_id = NULL;
+			temp.insertTransactionData();
 		}
 	}
+
+	//TODO Add error handling
 	transaction transaction_fetch(int position) {
 		transaction result;
 		std::string selectTransactionSQL = "SELECT id, transaction_type, transaction_initiator, balance_before_transaction, "
@@ -970,22 +1002,22 @@ public:
 		return result;
 	}
 
-	void createtransactionclient(client b)
+	//Server only, do not use
+	void createtransactionclient(int& errorcode, std::string& errormsg, client b)
 	{
-		transaction temp;
-		temp.transaction_initiator = 0;
+		this->transaction_initiator = 0;
 		bool idExists = 0;
 		while (!idExists)
 		{
 			std::cout << "Input your transaction type (w for withdrawal, d for deposit) : "; char typet; std::cin >> typet;
 			if (typet == 'd')
 			{
-				temp.transaction_type = 1;
+				this->transaction_type = 1;
 				idExists = 1;
 			}
 			else if (typet == 'w')
 			{
-				temp.transaction_type = 0;
+				this->transaction_type = 0;
 				idExists = 1;
 			}
 			else
@@ -994,56 +1026,156 @@ public:
 			}
 		}
 		idExists = 0;
-		temp.client_id = b.id;
-		temp.broker_id = b.broker_id;
-		broker a; 
-		a = a.getBrokerById(temp.broker_id);
-		b = b.getClientById(temp.client_id);
+		this->client_id = b.id;
+		this->broker_id = b.broker_id;
+		broker a;
+		a = a.getBrokerById(this->broker_id);
+		b = b.getClientById(this->client_id);
 		idExists = 1;
-		
 
 		bool sum_is_possible = 0; float clientsum; float broker_sum = 0;
-		temp.balance_before_transaction = a.portfolio_in_USDT();
+		this->balance_before_transaction = a.portfolio_in_USDT();
 		while (!sum_is_possible) {
-			std::cout << "Input transaction sum : "; std::cin >> temp.trasactionsum;
+			std::cout << "Input transaction sum : "; std::cin >> this->trasactionsum;
 
-			if (temp.transaction_type)
+			if (this->transaction_type)
 			{
-				broker_sum = (b.cut_percent / 100) * temp.trasactionsum;
-				clientsum = temp.trasactionsum - broker_sum + (b.portfolio_percent / 100) * temp.balance_before_transaction;
-				temp.balance_after_transaction = temp.balance_before_transaction + temp.trasactionsum;
+				broker_sum = (b.cut_percent / 100) * this->trasactionsum;
+				clientsum = this->trasactionsum - broker_sum + (b.portfolio_percent / 100) * this->balance_before_transaction;
+				this->balance_after_transaction = this->balance_before_transaction + this->trasactionsum;
 				sum_is_possible = 1;
 			}
 			else
 			{
-				clientsum = (b.portfolio_percent / 100) * temp.balance_before_transaction - temp.trasactionsum;
+				clientsum = (b.portfolio_percent / 100) * this->balance_before_transaction - this->trasactionsum;
 				if (clientsum < 0)
 				{
-					std::cout << "You do not have enough funds to withdraw, your current percent is worth " << (a.portfolio_percent / 100) * temp.balance_before_transaction << "$" << std::endl;
+					std::cout << "You do not have enough funds to withdraw, your current percent is worth " << (a.portfolio_percent / 100) * this->balance_before_transaction << "$" << std::endl;
 				}
-				else { temp.balance_after_transaction = temp.balance_before_transaction - temp.trasactionsum; sum_is_possible = 1; }
+				else { this->balance_after_transaction = this->balance_before_transaction - this->trasactionsum; sum_is_possible = 1; }
 			}
 		}
 
-		b.portfolio_percent = (clientsum / temp.balance_after_transaction) * 100;
+		b.portfolio_percent = (clientsum / this->balance_after_transaction) * 100;
 		float tempclientsum;
 		std::vector<client> vec = b.getClientsByBrokerId(a.id);
 		for (int i = 0; i < vec.size(); i++)
 		{
 			if (vec[i].id != b.id) {
-				tempclientsum = (vec[i].portfolio_percent / 100) * temp.balance_before_transaction;
-				vec[i].portfolio_percent = (tempclientsum / temp.balance_after_transaction) * 100;
-				vec[i].updateClientById(vec[i]);
+				tempclientsum = (vec[i].portfolio_percent / 100) * this->balance_before_transaction;
+				vec[i].portfolio_percent = (tempclientsum / this->balance_after_transaction) * 100;
+				if (vec[i].updateClientById(errorcode, errormsg) == 0) { errormsg = errormsg + "\nTransaction could not be completed"; }
 			}
 		}
-		broker_sum = broker_sum + (a.portfolio_percent / 100) * temp.balance_before_transaction;
-		a.portfolio_percent = (broker_sum / temp.balance_after_transaction) * 100;
-		b.updateClientById(b);
-		a.updateBrokerById(a);
-		temp.insertTransactionData(temp);
+		broker_sum = broker_sum + (a.portfolio_percent / 100) * this->balance_before_transaction;
+		a.portfolio_percent = (broker_sum / this->balance_after_transaction) * 100;
+		if (b.updateClientById(errorcode, errormsg) == 0) { errormsg = errormsg + "\nTransaction could not be completed"; }
+		if (a.updateBrokerById(a) == 0) { errormsg = errormsg + "\nTransaction could not be completed"; }
+		this->insertTransactionData();
 	}
 
-	void createtransactionbroker(broker a)
+	//needs transaction type and transaction sum specified within object
+	int create_transaction_client_api(int& errorcode, std::string& errormsg, client b)
+	{
+		
+		this->transaction_initiator = 0;
+		bool idExists = 0;
+		this->client_id = b.id;
+		this->broker_id = b.broker_id;
+		broker a;
+		a = a.getBrokerById(this->broker_id);
+		b = b.getClientById(this->client_id);
+		idExists = 1;
+		bool sum_is_possible = 0; float clientsum; float broker_sum = 0;
+		this->balance_before_transaction = a.portfolio_in_USDT();
+
+		if (this->transaction_type)
+		{
+			broker_sum = (b.cut_percent / 100) * this->trasactionsum;
+			clientsum = this->trasactionsum - broker_sum + (b.portfolio_percent / 100) * this->balance_before_transaction;
+			this->balance_after_transaction = this->balance_before_transaction + this->trasactionsum;
+			sum_is_possible = 1;
+		}
+		else
+		{
+			clientsum = (b.portfolio_percent / 100) * this->balance_before_transaction - this->trasactionsum;
+			if (clientsum < 0)
+			{
+				errorcode = 400; errormsg = "Not enough funds for withdrawal"; return 400;
+			}
+			else { this->balance_after_transaction = this->balance_before_transaction - this->trasactionsum; sum_is_possible = 1; }
+		}
+
+		b.portfolio_percent = (clientsum / this->balance_after_transaction) * 100;
+		float tempclientsum;
+		
+		std::vector<client> vec = b.getClientsByBrokerId(a.id);
+		for (int i = 0; i < vec.size(); i++)
+		{
+			if (vec[i].id != b.id) {
+				tempclientsum = (vec[i].portfolio_percent / 100) * this->balance_before_transaction;
+				vec[i].portfolio_percent = (tempclientsum / this->balance_after_transaction) * 100;
+				if (vec[i].updateClientById(errorcode, errormsg) == 0) { errormsg = errormsg + "\nTransaction could not be completed"; }
+			}
+		}
+		broker_sum = broker_sum + (a.portfolio_percent / 100) * this->balance_before_transaction;
+		a.portfolio_percent = (broker_sum / this->balance_after_transaction) * 100;
+		if (b.updateClientById(errorcode, errormsg) == 0) { errormsg = errormsg + "\nTransaction could not be completed"; }
+		if (a.updateBrokerById(a) == 0) { errormsg = errormsg + "\nTransaction could not be completed"; }
+		this->insertTransactionData();
+		
+		return 0;
+		
+	}
+
+	//needs transaction type and transaction sum specified within object
+	int create_transaction_broker_api(int& errorcode, std::string& errormsg, broker a)
+	{
+		Timer timer;
+		this->transaction_initiator = 1;
+		this->broker_id = a.id;
+		{
+			bool sum_is_possible = 0; float broker_sum;
+			while (!sum_is_possible) {
+				this->balance_before_transaction = a.portfolio_in_USDT();
+				if (this->transaction_type)
+				{
+					broker_sum = this->trasactionsum + (a.portfolio_percent / 100) * this->balance_before_transaction;
+					this->balance_after_transaction = this->balance_before_transaction + this->trasactionsum;
+					sum_is_possible = 1;
+				}
+				else
+				{
+					broker_sum = (a.portfolio_percent / 100) * this->balance_before_transaction - this->trasactionsum;
+					if (broker_sum < 0)
+					{
+						errorcode = 400; errormsg = "Not enough funds for withdrawal"; return 400;
+					}
+					else { this->balance_after_transaction = this->balance_before_transaction - this->trasactionsum; sum_is_possible = 1; }
+				}
+			}
+			float tempclientsum;
+			client b;
+			timer.start();
+			std::vector<client> vec = b.getClientsByBrokerId(a.id);
+			for (int i = 0; i < vec.size(); i++)
+			{
+				tempclientsum = (vec[i].portfolio_percent / 100) * this->balance_before_transaction;
+				vec[i].portfolio_percent = (tempclientsum / this->balance_after_transaction) * 100;
+				if (vec[i].updateClientById(errorcode, errormsg) == 0) { errormsg = errormsg + "\nTransaction could not be completed"; }
+			}
+			a.portfolio_percent = (broker_sum / this->balance_after_transaction) * 100;
+		}
+		if (a.updateBrokerById(a) == 0) { errormsg = errormsg + "\nTransaction could not be completed"; }
+		this->client_id = NULL;
+		this->insertTransactionData();
+		timer.end();
+		return 0;
+		
+	}
+
+	//Server only, do not use
+	void createtransactionbroker(int& errorcode, std::string& errormsg, broker a)
 	{
 		transaction temp;
 		temp.transaction_initiator = 1;
@@ -1066,15 +1198,8 @@ public:
 				std::cout << "Bad input" << std::endl;
 			}
 		}
-
 		idExists = 0;
-		
-		
-
-		
-
 		temp.broker_id = a.id;
-
 		{
 			bool sum_is_possible = 0; float broker_sum;
 			while (!sum_is_possible) {
@@ -1104,13 +1229,13 @@ public:
 			{
 				tempclientsum = (vec[i].portfolio_percent / 100) * temp.balance_before_transaction;
 				vec[i].portfolio_percent = (tempclientsum / temp.balance_after_transaction) * 100;
-				b.updateClientById(vec[i]);
+				if (vec[i].updateClientById(errorcode, errormsg) == 0) { errormsg = errormsg + "\nTransaction could not be completed"; }
 			}
 			a.portfolio_percent = (broker_sum / temp.balance_after_transaction) * 100;
 		}
-		a.updateBrokerById(a);
+		if (a.updateBrokerById(a) == 0) { errormsg = errormsg + "\nTransaction could not be completed"; }
 		temp.client_id = NULL;
-		temp.insertTransactionData(temp);
+		temp.insertTransactionData();
 	}
 };
 
@@ -1124,6 +1249,8 @@ class account
 	int account_id;
 	int account_reference_id;
 public:
+
+	//TODO Add error handling
 	bool addaccountdata(account temp) {
 		std::string insertAccountSQL = "INSERT INTO accounts (account_type, account_reference, email, phone_number, login, password) "
 			"VALUES (?, ?, ?, ?, ?, ?);";
@@ -1154,7 +1281,9 @@ public:
 		}
 	}
 
-	bool register_account()
+	//TODO Add error handling
+	//Server only, do not use
+	bool register_account(int& errorcode, std::string& errormsg)
 	{
 		account temp; bool verify = false;
 		while (!verify) {
@@ -1178,15 +1307,15 @@ public:
 		verify = false;
 		while (!verify) {
 			logger->trace("Username prompted");
-			std::cout << "Input username : "; std::cin.ignore(); std::getline(std::cin, temp.username); 
-			if (!doesUsernameExist(temp.username))
+			std::cout << "Input username : "; std::cin.ignore(); std::getline(std::cin, temp.username);
+			if (!doesUsernameExist(errorcode, errormsg, temp.username))
 			{
 				logger->trace("Username {} confirmed as non-existent in the database", temp.username);
 				verify = true;
 			}
 			else
 			{
-				logger->trace("Username {} already taken, asking for re-input",temp.username);
+				logger->trace("Username {} already taken, asking for re-input", temp.username);
 				std::cout << "Username already taken" << std::endl;
 			}
 		}
@@ -1204,14 +1333,25 @@ public:
 		if (temp.account_type == 2)
 		{
 			client clienttemp;
-			temp.account_reference_id = clienttemp.addClient();
-			return temp.addaccountdata(temp)&&insertSalt(temp.username,salt);
+			if (temp.addaccountdata(temp) && insertSalt(temp.username, salt))
+			{
+				temp = temp.fetchAccountByUsername(temp.username);
+				temp.account_reference_id = clienttemp.addClient();
+				return 1;
+			}
+			else { return 0; }
 		}
 		else if (temp.account_type == 3)
 		{
 			broker brokertemp;
-			temp.account_reference_id = brokertemp.addBroker();
-			return temp.addaccountdata(temp) && insertSalt(temp.username, salt);
+			if (temp.addaccountdata(temp) && insertSalt(temp.username, salt))
+			{
+				temp = temp.fetchAccountByUsername(temp.username);
+				temp.account_reference_id = brokertemp.addBroker(errorcode, errormsg);
+				temp.update();
+				return 1;
+			}
+			else { return 0; }
 		}
 		else {
 			logger->info("Superuser {} created", temp.username);
@@ -1219,11 +1359,13 @@ public:
 			return temp.addaccountdata(temp) && insertSalt(temp.username, salt);
 		}
 	}
+
+	//Server only, do not use
 	bool typeclient(account currentaccount)
 	{
-		client currentuser; currentuser = currentuser.getClientById(currentaccount.account_reference_id);
+		client currentuser; currentuser = currentuser.getClientById(currentaccount.account_reference_id); std::string errormsg;
 		transaction temp;
-		int choice;
+		int choice; int errorcode;
 		bool exitAccount = false;
 
 		while (!exitAccount) {
@@ -1237,7 +1379,7 @@ public:
 
 			switch (choice) {
 			case 1:
-				temp.createtransactionclient(currentuser);
+				temp.createtransactionclient(errorcode, errormsg, currentuser);
 				break;
 			case 2:
 				std::cout << "Exiting the application." << std::endl;
@@ -1253,24 +1395,30 @@ public:
 		}
 		return 0;
 	}
+
+	//Server only, do not use
 	bool typebroker(account currentaccount)
 	{
-		broker currentuser; currentuser = currentuser.broker_fetch(currentaccount.account_reference_id); transaction temp;
-		int choice;
+		currentaccount = currentaccount.fetchAccountByUsername(currentaccount.username);
+		broker currentuser; currentuser = currentuser.getBrokerById(currentaccount.account_reference_id);
+		transaction temp;
+		int choice, errorcode;
+		std::string errormsg;
 		bool exitAccount = false;
+		Timer timer;
 
 		while (!exitAccount) {
 			std::cout << "Menu Options:" << std::endl;
 			std::cout << "1. Create Transaction" << std::endl;
 			std::cout << "2. Exit Application" << std::endl;
 			std::cout << "3. Exit Account" << std::endl;
-			std::cout << "Enter your choice (1-3): ";
+			std::cout << "Enter your choice (1-4): ";
 
 			std::cin >> choice;
 
 			switch (choice) {
 			case 1:
-				temp.createtransactionbroker(currentuser);
+				temp.createtransactionbroker(errorcode, errormsg, currentuser);
 				break;
 			case 2:
 				std::cout << "Exiting the application." << std::endl;
@@ -1279,6 +1427,13 @@ public:
 				std::cout << "Exiting the account." << std::endl;
 				exitAccount = true;
 				break;
+			case 4:
+				temp.transaction_type = 1;
+				temp.trasactionsum = 50;
+
+				
+				temp.create_transaction_broker_api(errorcode, errormsg, currentuser);
+				
 			default:
 				std::cout << "Invalid choice. Please select a valid option (1-3)." << std::endl;
 				break;
@@ -1286,73 +1441,77 @@ public:
 		}
 		return 0;
 	}
+
+	//Server only, do not use
 	bool superuser(account currentuser)
 	{
 		logger->info("Superuser {} signed in", currentuser.username);
 		std::vector<transaction> transactions;
-	broker temp; transaction transacc; client tempp; account acc;
-	int choice;
-	
-	while (true) {
-		std::cout << "Menu:" << std::endl;
-		std::cout << "1. Input Broker" << std::endl;
-		std::cout << "2. Input Client" << std::endl;
-		std::cout << "3. Input Transaction" << std::endl;
-		std::cout << "4. Output Brokers" << std::endl;
-		std::cout << "5. Output Clients" << std::endl;
-		std::cout << "6. Output Transactions" << std::endl;
-		std::cout << "7. Exit" << std::endl;
-		std::cout << "Enter your choice: ";
+		broker temp; transaction transacc; client tempp; account acc;
+		int choice, errorcode=0;
+		std::string errormsg;
 
-		if (!(std::cin >> choice)) {
-			std::cerr << "Invalid input. Please enter a valid number." << std::endl;
-			std::cin.clear();
-			std::cin.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
-			continue;
-		}
+		while (true) {
+			std::cout << "Menu:" << std::endl;
+			std::cout << "1. Input Broker" << std::endl;
+			std::cout << "2. Input Client" << std::endl;
+			std::cout << "3. Input Transaction" << std::endl;
+			std::cout << "4. Output Brokers" << std::endl;
+			std::cout << "5. Output Clients" << std::endl;
+			std::cout << "6. Output Transactions" << std::endl;
+			std::cout << "7. Exit" << std::endl;
+			std::cout << "Enter your choice: ";
 
-		switch (choice) {
-		case 1:
-			// Input Broker logic here
-			choice = temp.addBroker();
-			logger->info("Broker with id {} was created by superuser {}", choice, currentuser.username);
-			break;
-		case 2:
-			// Input Client logic here
-			choice = tempp.addClient();
-			logger->info("Client with id {} was created by superuser {}", choice, currentuser.username);
-			break;
-		case 3:
-			// Input Transaction logic here
-			transacc.createtransaction();
-			break;
-		case 4:
-			// Output list of brokers
-			temp.coutallbrokers();
-			break;
-		case 5:
-			// Output list of clients
-			tempp.coutallclients();
-			break;
-		case 6:
-			// Output list of transactions
-			//outputTransactions(transactions, brokers);
-			break;
-		case 7:
-			// Exit the program
-			std::cout << "Exiting the program." << std::endl;
-			return 0;
-		case 8:
-			std::cout << "Account registration sequence starting" << std::endl << std::endl;
+			if (!(std::cin >> choice)) {
+				std::cerr << "Invalid input. Please enter a valid number." << std::endl;
+				std::cin.clear();
+				std::cin.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
+				continue;
+			}
 
-			acc.register_account();
-		default:
-			std::cout << "Invalid choice. Please enter a valid option (1-7)." << std::endl;
+			switch (choice) {
+			case 1:
+				// Input Broker logic here
+				choice = temp.addBroker(errorcode, errormsg);
+				logger->info("Broker with id {} was created by superuser {}", choice, currentuser.username);
+				break;
+			case 2:
+				// Input Client logic here
+				choice = tempp.addClient();
+				logger->info("Client with id {} was created by superuser {}", choice, currentuser.username);
+				break;
+			case 3:
+				// Input Transaction logic here
+				transacc.createtransaction(errorcode, errormsg);
+				break;
+			case 4:
+				// Output list of brokers
+				temp.coutallbrokers();
+				break;
+			case 5:
+				// Output list of clients
+				tempp.coutallclients();
+				break;
+			case 6:
+				// Output list of transactions
+				//outputTransactions(transactions, brokers);
+				break;
+			case 7:
+				// Exit the program
+				std::cout << "Exiting the program." << std::endl;
+				return 0;
+			case 8:
+				std::cout << "Account registration sequence starting" << std::endl << std::endl;
+
+				acc.register_account(errorcode, errormsg);
+			default:
+				std::cout << "Invalid choice. Please enter a valid option (1-7)." << std::endl;
+			}
 		}
 	}
-	}
 
-	int CheckPass(const std::string& login, const std::string& password) {
+	//TODO Add error handling
+	int CheckPass() {
 		// SQL statement to select an account based on login
 		const char* selectSQL = "SELECT account_type, password FROM accounts WHERE login = ? LIMIT 1;";
 		sqlite3_stmt* stmt;
@@ -1360,7 +1519,7 @@ public:
 		// Prepare the SQL statement
 		if (sqlite3_prepare_v2(db, selectSQL, -1, &stmt, nullptr) == SQLITE_OK) {
 			// Bind the login parameter to the statement
-			sqlite3_bind_text(stmt, 1, login.c_str(), -1, SQLITE_STATIC);
+			sqlite3_bind_text(stmt, 1, this->username.c_str(), -1, SQLITE_STATIC);
 
 			// Execute the statement
 			if (sqlite3_step(stmt) == SQLITE_ROW) {
@@ -1375,7 +1534,7 @@ public:
 
 				if (sqlite3_prepare_v2(keybase, selectSaltSQL, -1, &stmt2, 0) == SQLITE_OK) {
 					// Bind the username parameter
-					sqlite3_bind_text(stmt2, 1, login.c_str(), -1, SQLITE_STATIC);
+					sqlite3_bind_text(stmt2, 1, this->username.c_str(), -1, SQLITE_STATIC);
 
 					// Execute the query
 					if (sqlite3_step(stmt2) == SQLITE_ROW) {
@@ -1383,7 +1542,7 @@ public:
 						const char* salt = reinterpret_cast<const char*>(sqlite3_column_text(stmt2, 0));
 
 						// Now, call the checkmatch function with the correct arguments
-						if (checkmatch(password, storedPassword, salt)) {
+						if (checkmatch(this->password, storedPassword, salt)) {
 							// Password matches, return the account type
 							sqlite3_finalize(stmt);
 							sqlite3_finalize(stmt2);
@@ -1404,21 +1563,43 @@ public:
 		return 0;
 	}
 
+	//requires Username and Password predefined in account object
+	bool API_auth(int& errorcode, std::string& errormsg)
+	{
+		if (this->CheckPass() == 1)
+		{
+			return this->superuser(*this);
+		}
+		else if (this->CheckPass() == 2)
+		{
+			return this->typeclient(*this);
+		}
+		else if (this->CheckPass() == 3)
+		{
+			return this->typebroker(*this);
+		}
+		else
+		{
+			errorcode = 500; errormsg = "Wrong password or login";
+			return false;
+		}
+	}
 
+	//Server only, do not use
 	bool auth()
 	{
 		account temp;
 		std::cout << "Input your login : "; std::cin >> temp.username;
 		std::cout << "Input your password : "; std::cin >> temp.password;
-		if (temp.CheckPass(temp.username, temp.password) == 1)
+		if (temp.CheckPass() == 1)
 		{
 			return temp.superuser(temp);
 		}
-		else if (temp.CheckPass(temp.username, temp.password) == 2)
+		else if (temp.CheckPass() == 2)
 		{
 			return temp.typeclient(temp);
 		}
-		else if (temp.CheckPass(temp.username, temp.password) == 3)
+		else if (temp.CheckPass() == 3)
 		{
 			return temp.typebroker(temp);
 		}
@@ -1427,7 +1608,10 @@ public:
 			std::cout << "Login or Password missmatch" << std::endl;
 		}
 	}
+
 private:
+
+	//TODO Add error handling
 	account fetchAccountByUsername(const std::string& username) {
 		account aaccount;
 
@@ -1459,39 +1643,78 @@ private:
 
 		return aaccount;
 	}
+
+	//TODO Add error handling
+	bool update()
+	{
+		// Construct the SQL query
+		const char* updateSQL = "UPDATE accounts SET "
+			"account_type = ?,"
+			"account_reference = ?,"
+			"email = ?,"
+			"phone_number = ?,"
+			"login = ?,"
+			"password = ? "
+			"WHERE account_id = ?";
+
+		// Prepare the SQL statement
+		sqlite3_stmt* stmt;
+		if (sqlite3_prepare_v2(db, updateSQL, -1, &stmt, nullptr) != SQLITE_OK)
+		{
+			// Handle SQL statement preparation error
+			return false;
+		}
+
+		// Bind the parameters to the SQL statement
+		sqlite3_bind_int(stmt, 1, this->account_type);
+		sqlite3_bind_int(stmt, 2, this->account_reference_id);
+		sqlite3_bind_text(stmt, 3, this->email.c_str(), -1, SQLITE_STATIC);
+		sqlite3_bind_int(stmt, 4, this->phonenumber);
+		sqlite3_bind_text(stmt, 5, this->username.c_str(), -1, SQLITE_STATIC);
+		sqlite3_bind_text(stmt, 6, this->password.c_str(), -1, SQLITE_STATIC);
+		sqlite3_bind_int(stmt, 7, this->account_id);
+
+		// Execute the SQL statement
+		if (sqlite3_step(stmt) != SQLITE_DONE)
+		{
+			// Handle SQL execution error
+			sqlite3_finalize(stmt); // Finalize the statement
+			return false;
+		}
+
+		// Finalize the statement and return success
+		sqlite3_finalize(stmt);
+		return true;
+	}
 };
 
+//Debug version of main
 int main()
 {
 	logger->set_level(spdlog::level::info);
 	logger->trace("The program was started");
-	if (createTables(create_or_open_db(&db,"localdb.db")) && create_api_key_decrypt_tables(create_or_open_db(&keybase, "keys.db")))
+	if (createTables(create_or_open_db(&db, "localdb.db")) && create_api_key_decrypt_tables(create_or_open_db(&keybase, "keys.db")))
 	{
-		
+		const char* sql = "PRAGMA database_list;";
+		sqlite3_stmt* stmt;
 
-		
-			const char* sql = "PRAGMA database_list;";
-			sqlite3_stmt* stmt;
-
-			if (sqlite3_prepare_v2(keybase, sql, -1, &stmt, nullptr) == SQLITE_OK) {
-				while (sqlite3_step(stmt) == SQLITE_ROW) {
-					const char* databaseName = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 2));
-					std::cout << "Connected to database: " << databaseName << std::endl;
-				}
-
-				sqlite3_finalize(stmt);
-			}
-			else {
-				std::cerr << "Failed to prepare PRAGMA statement: " << sqlite3_errmsg(keybase) << std::endl;
+		if (sqlite3_prepare_v2(keybase, sql, -1, &stmt, nullptr) == SQLITE_OK) {
+			while (sqlite3_step(stmt) == SQLITE_ROW) {
+				const char* databaseName = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 2));
+				std::cout << "Connected to database: " << databaseName << std::endl;
 			}
 
-			
-		
-		
+			sqlite3_finalize(stmt);
+		}
+		else {
+			std::cerr << "Failed to prepare PRAGMA statement: " << sqlite3_errmsg(keybase) << std::endl;
+		}
+
 		logger->trace("All tables created successfully");
 		account temp;
-		int choice;
+		int choice, errorcode;
 		bool exitMenu = false;
+		std::string errormsg;
 
 		while (!exitMenu) {
 			logger->trace("Menu called");
@@ -1506,7 +1729,7 @@ int main()
 			switch (choice) {
 			case 1:
 				logger->trace("Case 1 entered, register account called");
-				temp.register_account(); // Call the register_account function from your 'temp' object
+				temp.register_account(errorcode, errormsg); // Call the register_account function from your 'temp' object
 				break;
 			case 2:
 				logger->trace("Case 2 entered, auth called");
@@ -1523,13 +1746,13 @@ int main()
 				break;
 			}
 		}
-		
+
 		return 0;
 	}
 	else {
-		std::cout << "Database critical error. Exiting program" << std::endl; 
+		std::cout << "Database critical error. Exiting program" << std::endl;
 		logger->critical("Database critical error. Database could not be opened");
-		system("pause"); 
+		system("pause");
 		return 0;
 	}
 }
