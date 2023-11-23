@@ -8,6 +8,7 @@
 #include <cryptopp/base64.h>
 #include <openssl/sha.h>
 #include <openssl/evp.h>
+#include <random>
 
 using namespace CryptoPP;
 

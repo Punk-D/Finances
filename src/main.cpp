@@ -1,20 +1,39 @@
 #include "SQLite_functions.h"
+#include <winsock2.h>
 #include "encrypt.h"
 #include <iostream>
 #include <string>
 #include <vector>
-#include <random>
 #include <cctype>
 #include <bitset>
 #include <chrono>
+#include <thread>
+#include <queue>
+#include <condition_variable>
+#include <cpprest/json.h>
+#include <mutex>
+#include <map>
+#include <functional>
+#include <future>
+#include <pplx/pplxtasks.h>
+#include <cstring>
+#pragma comment(lib, "ws2_32.lib")
 
 // Constant for salt lenght. Only affects salt that will be generated after changed
 // Previously generated salt will remain the same size, the change will not create any trouble to already created lines
 // Keep this at sizes below 100
 const int saltlen = 10;
 
+// Constant for session token lenght. Better keep higher than 10 and below 200
+const int tokenlen = 20;
+
+// Integer to manage how many hours a non-remember session lives
+int sess_non_rem_len = 4;
+
+// Integer to manage how many days a remember session lives
+int sess_rem_len = 30;
 // TODO restructure this to be safer
-// superuser password. 
+// superuser password.
 std::string supass = "4132";
 
 //debug function to test performance
@@ -195,6 +214,51 @@ bool sudo_registration_verification()
 	}
 }
 
+// Session creation function
+bool create_session(int& errorcode, std::string& errormsg, std::string CSRF, std::string& Token, int accid, bool remember)
+{
+	std::cout << "Create session called" << std::endl;
+	std::chrono::system_clock::time_point now = std::chrono::system_clock::now();
+	std::tm newTm;
+	char buffer[20];
+
+	if (remember)
+	{
+		std::chrono::hours duration(sess_rem_len * 24);
+		std::chrono::system_clock::time_point newTime = now + duration;
+		std::time_t newTimeT = std::chrono::system_clock::to_time_t(newTime);
+
+		localtime_s(&newTm, &newTimeT);
+		std::strftime(buffer, sizeof(buffer), "%Y-%m-%d %H:%M:%S", &newTm);
+	}
+	else
+	{
+		std::chrono::hours duration(sess_non_rem_len);
+		std::chrono::system_clock::time_point newTime = now + duration;
+		std::time_t newTimeT = std::chrono::system_clock::to_time_t(newTime);
+
+		localtime_s(&newTm, &newTimeT);
+		std::strftime(buffer, sizeof(buffer), "%Y-%m-%d %H:%M:%S", &newTm);
+	}
+
+	Token = generateSalt(tokenlen);
+	bool untiltrue = false;
+
+	while (!untiltrue)
+	{
+		if (insert_into_session(CSRF, Token, buffer, accid))
+		{
+			untiltrue = true;
+		}
+		else
+		{
+			Token = generateSalt(tokenlen);
+		}
+	}
+
+	return true;
+}
+
 class broker
 {
 public:
@@ -242,7 +306,6 @@ public:
 		// Return -1 to indicate failure
 		return -1;
 	}
-
 
 	//TODO Add error handling
 	int addBrokerAPI(int& errorcode, std::string& errormsg)
@@ -1077,7 +1140,6 @@ public:
 	//needs transaction type and transaction sum specified within object
 	int create_transaction_client_api(int& errorcode, std::string& errormsg, client b)
 	{
-		
 		this->transaction_initiator = 0;
 		bool idExists = 0;
 		this->client_id = b.id;
@@ -1108,7 +1170,7 @@ public:
 
 		b.portfolio_percent = (clientsum / this->balance_after_transaction) * 100;
 		float tempclientsum;
-		
+
 		std::vector<client> vec = b.getClientsByBrokerId(a.id);
 		for (int i = 0; i < vec.size(); i++)
 		{
@@ -1123,9 +1185,8 @@ public:
 		if (b.updateClientById(errorcode, errormsg) == 0) { errormsg = errormsg + "\nTransaction could not be completed"; }
 		if (a.updateBrokerById(a) == 0) { errormsg = errormsg + "\nTransaction could not be completed"; }
 		this->insertTransactionData();
-		
+
 		return 0;
-		
 	}
 
 	//needs transaction type and transaction sum specified within object
@@ -1171,7 +1232,6 @@ public:
 		this->insertTransactionData();
 		timer.end();
 		return 0;
-		
 	}
 
 	//Server only, do not use
@@ -1241,6 +1301,7 @@ public:
 
 class account
 {
+public:
 	int account_type;
 	std::string username;
 	std::string password;
@@ -1280,6 +1341,45 @@ public:
 			return false;
 		}
 	}
+
+	// Function to fetch an account by account_id and populate the current instance (this)
+	void fetchAccountById(int account_id) {
+		// Open the SQLite database
+		sqlite3* db;
+		if (sqlite3_open("your_database.db", &db) == SQLITE_OK) {
+			std::string query = "SELECT * FROM accounts WHERE account_id = " + std::to_string(account_id);
+
+			// Execute the query
+			sqlite3_stmt* stmt;
+			if (sqlite3_prepare_v2(db, query.c_str(), -1, &stmt, 0) == SQLITE_OK) {
+				if (sqlite3_step(stmt) == SQLITE_ROW) {
+					// Fill the current instance with data from the query
+					this->account_id = sqlite3_column_int(stmt, 0);
+					this->account_type = sqlite3_column_int(stmt, 1);
+					// Set other fields similarly
+
+					// Finalize the statement and close the database
+					sqlite3_finalize(stmt);
+					sqlite3_close(db);
+				}
+				else {
+					// No results found
+					sqlite3_finalize(stmt);
+					sqlite3_close(db);
+					this->account_id = -1; // Or set to another appropriate value
+				}
+			}
+			else {
+				std::cerr << "Error executing query: " << sqlite3_errmsg(db) << std::endl;
+				this->account_id = -1; // Or set to another appropriate value
+			}
+		}
+		else {
+			std::cerr << "Failed to open the database." << std::endl;
+			this->account_id = -1; // Or set to another appropriate value
+		}
+	}
+
 
 	//TODO Add error handling
 	//Server only, do not use
@@ -1431,9 +1531,8 @@ public:
 				temp.transaction_type = 1;
 				temp.trasactionsum = 50;
 
-				
 				temp.create_transaction_broker_api(errorcode, errormsg, currentuser);
-				
+
 			default:
 				std::cout << "Invalid choice. Please select a valid option (1-3)." << std::endl;
 				break;
@@ -1448,7 +1547,7 @@ public:
 		logger->info("Superuser {} signed in", currentuser.username);
 		std::vector<transaction> transactions;
 		broker temp; transaction transacc; client tempp; account acc;
-		int choice, errorcode=0;
+		int choice, errorcode = 0;
 		std::string errormsg;
 
 		while (true) {
@@ -1563,52 +1662,6 @@ public:
 		return 0;
 	}
 
-	//requires Username and Password predefined in account object
-	bool API_auth(int& errorcode, std::string& errormsg)
-	{
-		if (this->CheckPass() == 1)
-		{
-			return this->superuser(*this);
-		}
-		else if (this->CheckPass() == 2)
-		{
-			return this->typeclient(*this);
-		}
-		else if (this->CheckPass() == 3)
-		{
-			return this->typebroker(*this);
-		}
-		else
-		{
-			errorcode = 500; errormsg = "Wrong password or login";
-			return false;
-		}
-	}
-
-	//Server only, do not use
-	bool auth()
-	{
-		account temp;
-		std::cout << "Input your login : "; std::cin >> temp.username;
-		std::cout << "Input your password : "; std::cin >> temp.password;
-		if (temp.CheckPass() == 1)
-		{
-			return temp.superuser(temp);
-		}
-		else if (temp.CheckPass() == 2)
-		{
-			return temp.typeclient(temp);
-		}
-		else if (temp.CheckPass() == 3)
-		{
-			return temp.typebroker(temp);
-		}
-		else
-		{
-			std::cout << "Login or Password missmatch" << std::endl;
-		}
-	}
-
 private:
 
 	//TODO Add error handling
@@ -1643,6 +1696,110 @@ private:
 
 		return aaccount;
 	}
+public:
+	//requires Username and Password predefined in account object
+	bool API_auth(int& errorcode, std::string& errormsg, std::string& CSRF, std::string& Token, bool rem)
+	{
+		if (this->CheckPass() != 0)
+		{
+			this->account_id = this->fetchAccountByUsername(this->username).account_id;
+			create_session(errorcode, errormsg, CSRF, Token, this->account_id, rem);
+			return true;
+		}
+		else
+		{
+			errorcode = 500; errormsg = "Wrong password or login";
+			return false;
+		}
+	}
+
+	//requires username and password
+	//requires email and phone number
+	//
+	bool register_account_api_step1(int& errorcode, std::string& errormsg, std::string& CSRF, std::string& Token)
+	{
+		account temp;
+
+		logger->trace("Username prompted");
+		if (!doesUsernameExist(errorcode, errormsg, temp.username))
+		{
+			logger->trace("Username {} confirmed as non-existent in the database", temp.username);
+		}
+		else
+		{
+			logger->trace("Username {} already taken, asking for re-input", temp.username);
+			std::cout << "Username already taken" << std::endl;
+			errorcode = 409; errormsg = "Username already taken";
+			return 0;
+		}
+
+		logger->trace("Password prompted");
+		std::cout << "Input password : "; std::getline(std::cin, temp.password);
+		if (!isStrongPassword(temp.password)) {
+			std::cout << "Password is not strong enough. Use at least 1 uppercase, 1 lowercase and 1 number with a length of at least 8 characters\nInput password : "; std::getline(std::cin, temp.password);
+			errorcode = 422; errormsg = "Weak password";
+			return 0;
+		}
+		std::string salt = generateSalt(saltlen);
+		temp.password = hashString(temp.password + salt);
+		logger->trace("Email prompted");
+		logger->trace("Phone number prompted");
+		if (temp.addaccountdata(temp)) {
+			temp.fetchAccountByUsername(temp.username);
+			create_session(errorcode, errormsg, CSRF, Token, temp.account_id,0); return 1; 
+		}
+		else { errorcode = 500; errormsg = "database error"; return 0; }
+		
+	}
+
+	void session_fetch(int&errorcode, std::string&errormsg ,std::string CSRF, std::string Token)
+	{
+		int c = fetchAccidAndDeleteExpiredSession(Token, CSRF);
+		if(c!=422)
+		{
+			if (c != 409)
+			{
+				this->fetchAccountById(c);
+			}
+			else
+			{
+				errorcode = 409; errormsg = "Session non existent or expired";
+			}
+		}
+		
+	}
+
+	bool register_account_api_step2(int& errorcode, std::string& errormsg, std::string& CSRF, std::string& Token)
+	{
+		this->session_fetch(errorcode, errormsg, CSRF, Token);
+
+	}
+
+	//Server only, do not use
+	bool auth()
+	{
+		account temp;
+		std::cout << "Input your login : "; std::cin >> temp.username;
+		std::cout << "Input your password : "; std::cin >> temp.password;
+		if (temp.CheckPass() == 1)
+		{
+			return temp.superuser(temp);
+		}
+		else if (temp.CheckPass() == 2)
+		{
+			return temp.typeclient(temp);
+		}
+		else if (temp.CheckPass() == 3)
+		{
+			return temp.typebroker(temp);
+		}
+		else
+		{
+			std::cout << "Login or Password missmatch" << std::endl;
+		}
+	}
+
+private:
 
 	//TODO Add error handling
 	bool update()
@@ -1688,12 +1845,301 @@ private:
 	}
 };
 
+void PrintJson(const web::json::value& json) {
+	// Serialize the JSON value to a string
+	std::wstringstream ss;
+	json.serialize(ss);
+
+	// Output the JSON as a string to the console
+	std::wcout << L"Received JSON: " << ss.str() << std::endl;
+}
+
+class RequestHandler {
+public:
+	web::json::value handleRequest(const web::json::value& data) {
+		if (data.has_field(U("FUNCTION"))) {
+			utility::string_t function_name = data.at(U("FUNCTION")).as_string();
+
+			if (function_name == U("auth")) {
+				return auth(data);
+			}
+			else {
+				// Handle an invalid function name
+				return CreateErrorResponse(U("Invalid function name: ") + function_name);
+			}
+		}
+		else {
+			// Handle the case where "FUNCTION" is missing
+			return CreateErrorResponse(U("Missing FUNCTION parameter"));
+		}
+	}
+
+	web::json::value auth(const web::json::value& data) {
+		// Authentication logic
+		web::json::value response;
+		int errorcode; std::string errormsg;
+		std::string Username = utility::conversions::to_utf8string(data.at(U("LOGIN")).as_string());
+		std::string Password = utility::conversions::to_utf8string(data.at(U("PASSWORD")).as_string());
+		std::string CSRF = utility::conversions::to_utf8string(data.at(U("CSRF")).as_string());
+		bool remember = data.at(U("REMEMBER_ME")).as_bool();
+		account temp;
+		temp.username = Username;
+		temp.password = Password;
+		std::string token;
+		if (temp.API_auth(errorcode, errormsg, CSRF, token, remember)) {
+			std::cout << "Auth success" << std::endl;
+
+			utility::string_t CSRFT = utility::conversions::to_string_t(CSRF);
+			response[U("CSRF")] = web::json::value::string(CSRFT);
+			response[U("TOKEN")] = web::json::value::string(utility::conversions::to_string_t(token));
+			response[U("Response")] = web::json::value::string(U("Authentication successful"));
+			return response;
+		}
+		else {
+			std::cout << "Auth fail" << std::endl;
+			response[U("Response")] = web::json::value::string(U("Authentication failed"));
+			return response;
+		}
+	}
+
+private:
+	web::json::value CreateErrorResponse(const utility::string_t& errorMessage) {
+		web::json::value errorResponse;
+		errorResponse[U("Error")] = web::json::value::string(errorMessage);
+		return errorResponse;
+	}
+};
+
+class ThreadPool {
+public:
+	ThreadPool(size_t numThreads) : stop(false) {
+		for (size_t i = 0; i < numThreads; ++i) {
+			workers.emplace_back([this] {
+				while (true) {
+					std::function<void()> task;
+
+					{
+						std::unique_lock<std::mutex> lock(queueMutex);
+						condition.wait(lock, [this] { return stop || !tasks.empty(); });
+
+						if (stop && tasks.empty()) {
+							return;
+						}
+
+						task = std::move(tasks.front());
+						tasks.pop();
+					}
+
+					task();
+				}
+				});
+		}
+	}
+
+	template <class F>
+	void enqueue(F&& f) {
+		{
+			std::unique_lock<std::mutex> lock(queueMutex);
+			tasks.emplace(std::forward<F>(f));
+		}
+		condition.notify_one();
+	}
+
+	~ThreadPool() {
+		{
+			std::unique_lock<std::mutex> lock(queueMutex);
+			stop = true;
+		}
+		condition.notify_all();
+
+		for (std::thread& worker : workers) {
+			worker.join();
+		}
+	}
+
+private:
+	std::vector<std::thread> workers;
+	std::queue<std::function<void()>> tasks;
+
+	std::mutex queueMutex;
+	std::condition_variable condition;
+	bool stop;
+};
+
+void handle_request(RequestHandler& handler, SOCKET client_socket) {
+	char buffer[1024] = { 0 };
+
+	// Receive data from Python
+	recv(client_socket, buffer, sizeof(buffer), 0);
+	std::string request_str = buffer;
+
+	// Convert the received data to web::json::value
+	web::json::value request_data = web::json::value::parse(request_str);
+
+	// Handle the request
+	web::json::value response_data = handler.handleRequest(request_data);
+
+	// Convert the response to a string
+	std::string response_str = utility::conversions::to_utf8string(response_data.serialize());
+
+	// Send the response back to Python
+	send(client_socket, response_str.c_str(), response_str.length(), 0);
+
+	closesocket(client_socket);
+}
+
+int main() {
+	if (createTables(create_or_open_db(&db, "localdb.db")) && create_api_key_decrypt_tables(create_or_open_db(&keybase, "keys.db")) && sessions_table(create_or_open_db(&sessions, "sessions.db"))) {
+		WSADATA wsaData;
+		SOCKET server_fd, new_socket;
+		struct sockaddr_in address;
+		int addrlen = sizeof(address);
+
+		if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
+			std::cerr << "WSAStartup failed" << std::endl;
+			return 1;
+		}
+
+		if ((server_fd = socket(AF_INET, SOCK_STREAM, 0)) == INVALID_SOCKET) {
+			std::cerr << "socket failed" << std::endl;
+			WSACleanup();
+			return 1;
+		}
+
+		address.sin_family = AF_INET;
+		address.sin_addr.s_addr = INADDR_ANY;
+		address.sin_port = htons(12345); // Adjust the port as needed
+
+		if (bind(server_fd, (struct sockaddr*)&address, sizeof(address)) == SOCKET_ERROR) {
+			std::cerr << "bind failed" << std::endl;
+			closesocket(server_fd);
+			WSACleanup();
+			return 1;
+		}
+
+		if (listen(server_fd, 3) == SOCKET_ERROR) {
+			std::cerr << "listen" << std::endl;
+			closesocket(server_fd);
+			WSACleanup();
+			return 1;
+		}
+
+		ThreadPool pool(4); // Adjust the number of threads as needed
+		RequestHandler requestHandler;
+
+		try {
+			while (true) {
+				if ((new_socket = accept(server_fd, (struct sockaddr*)&address, &addrlen)) == INVALID_SOCKET) {
+					int error_code = WSAGetLastError();
+					if (error_code == WSAEINTR) {
+						// The accept operation was interrupted, you can continue waiting for connections
+						continue;
+					}
+					else if (error_code == WSAEWOULDBLOCK || error_code == WSAECONNRESET) {
+						// Handle specific errors as needed
+						// For example, handle WSAEWOULDBLOCK by sleeping for a short time and then retrying
+						// For WSAECONNRESET, log the error and continue accepting connections
+						// You can add more specific error handling here.
+						continue;
+					}
+					else {
+						// Handle other errors
+						std::cerr << "Error: " << error_code << std::endl;
+						closesocket(server_fd);
+						WSACleanup();
+						return 1;
+					}
+				}
+
+				// Use the thread pool to handle the request
+				pool.enqueue([&requestHandler, new_socket] {
+					handle_request(requestHandler, new_socket);
+					closesocket(new_socket);
+					});
+			}
+		}
+		catch (const std::exception& e) {
+			// Handle exceptions (e.g., log the error)
+			std::cerr << "Exception: " << e.what() << std::endl;
+		}
+
+		// Cleanup and exit
+		closesocket(server_fd);
+		WSACleanup();
+
+		return 0;
+	}
+}
+
+//Failed cpprestsdk attempt
+/*
+int main() {
+	logger->set_level(spdlog::level::info);
+	logger->trace("The program was started");
+	if (!createTables(create_or_open_db(&db, "localdb.db"))) {
+		throw std::runtime_error("Failed to create tables for local database.");
+	}
+	if (!create_api_key_decrypt_tables(create_or_open_db(&keybase, "keys.db"))) {
+		throw std::runtime_error("Failed to create tables for keys database.");
+	}
+	if (!sessions_table(create_or_open_db(&sessions, "sessions.db"))) {
+		throw std::runtime_error("Failed to create sessions table.");
+	}
+
+	// Set up an HTTP listener
+	web::http::experimental::listener::http_listener listener(L"http://localhost:8080");
+
+	listener.support(web::http::methods::POST, [](web::http::http_request request) {
+		std::cout << "request received" << std::endl;
+		if (request.headers().content_type() != U("application/json")) {
+			request.reply(web::http::status_codes::UnsupportedMediaType, U("Expected JSON data."));
+			return;
+		}
+
+		request.extract_json().then([request](pplx::task<web::json::value> dataTask) {
+			// Create a RequestHandler instance
+			RequestHandler requestHandler;
+
+			// Handle the request asynchronously using .then
+			dataTask.then([request, &requestHandler](web::json::value data) {
+				web::json::value response = requestHandler.handleRequest(data);
+
+				web::http::http_response httpResponse(web::http::status_codes::OK);
+				httpResponse.headers().set_content_type(U("application/json"));
+				httpResponse.set_body(response);
+
+				// Send the response
+				std::cout << "Response sent" << std::endl;
+				request.reply(200,response);
+				std::cout << "A hundred percent sent" << std::endl;
+				PrintJson(response);
+				});
+			});
+		});
+
+	try {
+		listener.open().wait();
+		std::wcout << L"Listening on http://localhost:8080" << std::endl;
+
+		// Block the main thread to keep the listener running
+		std::this_thread::sleep_for(std::chrono::minutes(10 ^ 20));
+
+		listener.close().wait();
+	}
+	catch (const std::exception& e) {
+		std::cerr << "Error: " << e.what() << std::endl;
+	}
+
+	return 0;
+}
+*/
 //Debug version of main
-int main()
+
+int mainw()
 {
 	logger->set_level(spdlog::level::info);
 	logger->trace("The program was started");
-	if (createTables(create_or_open_db(&db, "localdb.db")) && create_api_key_decrypt_tables(create_or_open_db(&keybase, "keys.db")))
+	if (createTables(create_or_open_db(&db, "localdb.db")) && create_api_key_decrypt_tables(create_or_open_db(&keybase, "keys.db")) && sessions_table(create_or_open_db(&sessions, "sessions.db")))
 	{
 		const char* sql = "PRAGMA database_list;";
 		sqlite3_stmt* stmt;
